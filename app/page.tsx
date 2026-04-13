@@ -51,7 +51,6 @@ const TABS = [
 
 type TabName = (typeof TABS)[number];
 
-const SESSION_ID = "558f862e-1c64-49c2-968e-6d9274b71088";
 
 function getEffectiveOrForecast(row: DemandPlanRow) {
   return row.effective_value ?? row.previous_value ?? 0;
@@ -68,9 +67,17 @@ export default function Home() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
+  const [latestForecastDate] = useState("April 8, 2026");
+
+  const [showDemandContent, setShowDemandContent] = useState(false);
+
+  const [sessionId, setSessionId] = useState("558f862e-1c64-49c2-968e-6d9274b71088");
+  const [isGenerating, setIsGenerating] = useState(false);
+
   const [productFilter, setProductFilter] = useState("");
   const [channelFilter, setChannelFilter] = useState("");
   const [packagingFilter, setPackagingFilter] = useState("");
+  
 
   useEffect(() => {
     async function loadRows() {
@@ -85,7 +92,7 @@ export default function Home() {
         const { data, error } = await supabase
           .from("demand_plans")
           .select("*")
-          .eq("session_id", SESSION_ID)
+          .eq("session_id", sessionId)
           .order("brand", { ascending: true })
           .order("channel", { ascending: true })
           .order("packaging_format", { ascending: true })
@@ -113,7 +120,7 @@ export default function Home() {
     }
 
     loadRows();
-  }, []);
+  }, [sessionId]);
 
   const products = useMemo(() => {
     return [...new Set(rows.map((r) => r.brand))].sort();
@@ -260,6 +267,34 @@ export default function Home() {
     setOverrideReason("");
   }
 
+  async function handleGenerateDemandPlan() {
+    try {
+      setIsGenerating(true);
+      setError("");
+  
+      const response = await fetch("http://127.0.0.1:8000/run-forecast", {
+        method: "POST",
+      });
+  
+      if (!response.ok) {
+        throw new Error("Failed to generate demand plan");
+      }
+  
+      const result = await response.json();
+  
+      if (!result.session_id) {
+        throw new Error("No session_id returned from backend");
+      }
+  
+      setSessionId(result.session_id);
+      setShowDemandContent(true);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unknown error");
+    } finally {
+      setIsGenerating(false);
+    }
+  }
+
   function renderPlaceholderTab(title: string) {
     return (
       <div style={placeholderCardStyle}>
@@ -269,177 +304,234 @@ export default function Home() {
     );
   }
 
+  
   function renderDemandPlanTab() {
     return (
       <>
-        <div style={filterGridStyle}>
-          <div style={filterCardStyle}>
-            <label style={labelStyle}>Product</label>
-            <select
-              value={productFilter}
-              onChange={(e) => setProductFilter(e.target.value)}
-              style={selectStyle}
-            >
-              <option value="">All Products</option>
-              {products.map((product) => (
-                <option key={product} value={product}>
-                  {product}
-                </option>
-              ))}
-            </select>
-          </div>
-
-          <div style={filterCardStyle}>
-            <label style={labelStyle}>Channel</label>
-            <select
-              value={channelFilter}
-              onChange={(e) => setChannelFilter(e.target.value)}
-              style={selectStyle}
-            >
-              <option value="">All Channels</option>
-              {channels.map((channel) => (
-                <option key={channel} value={channel}>
-                  {channel}
-                </option>
-              ))}
-            </select>
-          </div>
-
-          <div style={filterCardStyle}>
-            <label style={labelStyle}>Packaging Type</label>
-            <select
-              value={packagingFilter}
-              onChange={(e) => setPackagingFilter(e.target.value)}
-              style={selectStyle}
-            >
-              <option value="">All Packaging Types</option>
-              {packagingFormats.map((packaging) => (
-                <option key={packaging} value={packaging}>
-                  {packaging}
-                </option>
-              ))}
-            </select>
-          </div>
-        </div>
-
         <div style={chartCardStyle}>
-          <div style={{ marginBottom: "12px" }}>
+          <div style={{ marginBottom: "8px" }}>
             <h2 style={{ margin: 0, fontSize: "28px", fontWeight: 700 }}>Demand Plan</h2>
             <p style={{ marginTop: "8px", marginBottom: 0, color: "#6b7280" }}>
-              Filter the forecast by brand, channel, and packaging type. The chart updates automatically and reflects any saved overrides.
+              Choose whether to use the latest generated forecast or run a brand new demand plan.
+            </p>
+            <p style={{ marginTop: "8px", marginBottom: 0, color: "#9ca3af", fontSize: "13px" }}>
+              Current session: {sessionId}
             </p>
           </div>
-
-          <div style={{ width: "100%", height: 360 }}>
-            <ResponsiveContainer width="100%" height={320}>
-              <LineChart data={chartData}>
-                <CartesianGrid strokeDasharray="3 3" vertical={false} />
-                <XAxis dataKey="week" />
-                <YAxis />
-                <Tooltip />
-                <Legend />
-                <Line
-                  type="monotone"
-                  dataKey="forecast"
-                  name="Forecast"
-                  stroke="#94a3b8"
-                  strokeWidth={3}
-                  dot={{ r: 3 }}
-                />
-                <Line
-                  type="monotone"
-                  dataKey="effective"
-                  name="Effective Plan"
-                  stroke="#2563eb"
-                  strokeWidth={3}
-                  dot={{ r: 4 }}
-                />
-              </LineChart>
-            </ResponsiveContainer>
-          </div>
-        </div>
-
-        <div style={tableCardStyle}>
-          <div style={{ padding: "24px 24px 0 24px" }}>
-            <h3 style={{ marginTop: 0, marginBottom: "8px", fontSize: "20px" }}>
-              Editable Demand Table
-            </h3>
-            <p style={{ marginTop: 0, color: "#6b7280" }}>
-              Edit a value and click outside the box to save it to Supabase as the effective plan.
-            </p>
-          </div>
-
-          <div style={{ overflowX: "auto" }}>
-            <table
+  
+          <div
+            style={{
+              display: "flex",
+              gap: "12px",
+              flexWrap: "wrap",
+              marginTop: "20px",
+            }}
+          >
+            <button
+              onClick={() => setShowDemandContent(true)}
               style={{
-                width: "100%",
-                minWidth: "1200px",
-                borderCollapse: "collapse",
+                background: "#111827",
+                color: "white",
+                border: "none",
+                borderRadius: "12px",
+                padding: "12px 18px",
+                fontWeight: 600,
+                cursor: "pointer",
               }}
             >
-              <thead>
-                <tr style={{ background: "#f8fafc" }}>
-                  {[
-                    "Brand",
-                    "Channel",
-                    "Packaging",
-                    "Week1",
-                    "Week2",
-                    "Week3",
-                    "Week4",
-                    "Week5",
-                    "Week6",
-                    "Week7",
-                    "Week8",
-                  ].map((header) => (
-                    <th
-                      key={header}
-                      style={{
-                        textAlign: "left",
-                        padding: "14px 16px",
-                        borderBottom: "1px solid #e5e7eb",
-                        fontSize: "13px",
-                        fontWeight: 700,
-                        color: "#374151",
-                      }}
-                    >
-                      {header}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {pivotRows.map((row, index) => (
-                  <tr
-                    key={row.key}
-                    style={{
-                      background: index % 2 === 0 ? "white" : "#fcfcfd",
-                    }}
-                  >
-                    <td style={cellStyle}>{row.brand}</td>
-                    <td style={cellStyle}>{row.channel}</td>
-                    <td style={cellStyle}>{row.packaging_format}</td>
-
-                    {[1, 2, 3, 4, 5, 6, 7, 8].map((week) => {
-                      const field = `Week${week}` as keyof PivotRow;
-                      return (
-                        <td key={week} style={cellStyle}>
-                          <input
-                            type="number"
-                            step="0.01"
-                            defaultValue={row[field] ?? ""}
-                            onBlur={(e) => handleCellUpdate(row, week, e.target.value)}
-                            style={inputStyle}
-                          />
-                        </td>
-                      );
-                    })}
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+              {`Generate Demand Plan with Most Recent Forecast (${latestForecastDate})`}
+            </button>
+  
+            <button
+              onClick={handleGenerateDemandPlan}
+              disabled={isGenerating}
+              style={{
+                background: isGenerating ? "#9ca3af" : "white",
+                color: "#111827",
+                border: "1px solid #d1d5db",
+                borderRadius: "12px",
+                padding: "12px 18px",
+                fontWeight: 600,
+                cursor: isGenerating ? "not-allowed" : "pointer",
+              }}
+            >
+              {isGenerating ? "Generating New Demand Plan..." : "Generate New Demand Plan"}
+            </button>
           </div>
         </div>
+  
+        {showDemandContent && (
+          <>
+            <div style={tableCardStyle}>
+              <div style={{ padding: "24px 24px 0 24px" }}>
+                <h3 style={{ marginTop: 0, marginBottom: "8px", fontSize: "20px" }}>
+                  Editable Demand Table
+                </h3>
+                <p style={{ marginTop: 0, color: "#6b7280" }}>
+                  Edit a value and click outside the box to save it to Supabase as the effective plan.
+                </p>
+              </div>
+  
+              <div style={{ overflowX: "auto" }}>
+                <table
+                  style={{
+                    width: "100%",
+                    minWidth: "1200px",
+                    borderCollapse: "collapse",
+                  }}
+                >
+                  <thead>
+                    <tr style={{ background: "#f8fafc" }}>
+                      {[
+                        "Brand",
+                        "Channel",
+                        "Packaging",
+                        "Week1",
+                        "Week2",
+                        "Week3",
+                        "Week4",
+                        "Week5",
+                        "Week6",
+                        "Week7",
+                        "Week8",
+                      ].map((header) => (
+                        <th
+                          key={header}
+                          style={{
+                            textAlign: "left",
+                            padding: "14px 16px",
+                            borderBottom: "1px solid #e5e7eb",
+                            fontSize: "13px",
+                            fontWeight: 700,
+                            color: "#374151",
+                          }}
+                        >
+                          {header}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {pivotRows.map((row, index) => (
+                      <tr
+                        key={row.key}
+                        style={{
+                          background: index % 2 === 0 ? "white" : "#fcfcfd",
+                        }}
+                      >
+                        <td style={cellStyle}>{row.brand}</td>
+                        <td style={cellStyle}>{row.channel}</td>
+                        <td style={cellStyle}>{row.packaging_format}</td>
+  
+                        {[1, 2, 3, 4, 5, 6, 7, 8].map((week) => {
+                          const field = `Week${week}` as keyof PivotRow;
+                          return (
+                            <td key={week} style={cellStyle}>
+                              <input
+                                type="number"
+                                step="0.01"
+                                defaultValue={row[field] ?? ""}
+                                onBlur={(e) => handleCellUpdate(row, week, e.target.value)}
+                                style={inputStyle}
+                              />
+                            </td>
+                          );
+                        })}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+  
+            <div style={filterGridStyle}>
+              <div style={filterCardStyle}>
+                <label style={labelStyle}>Product</label>
+                <select
+                  value={productFilter}
+                  onChange={(e) => setProductFilter(e.target.value)}
+                  style={selectStyle}
+                >
+                  <option value="">All Products</option>
+                  {products.map((product) => (
+                    <option key={product} value={product}>
+                      {product}
+                    </option>
+                  ))}
+                </select>
+              </div>
+  
+              <div style={filterCardStyle}>
+                <label style={labelStyle}>Channel</label>
+                <select
+                  value={channelFilter}
+                  onChange={(e) => setChannelFilter(e.target.value)}
+                  style={selectStyle}
+                >
+                  <option value="">All Channels</option>
+                  {channels.map((channel) => (
+                    <option key={channel} value={channel}>
+                      {channel}
+                    </option>
+                  ))}
+                </select>
+              </div>
+  
+              <div style={filterCardStyle}>
+                <label style={labelStyle}>Packaging Type</label>
+                <select
+                  value={packagingFilter}
+                  onChange={(e) => setPackagingFilter(e.target.value)}
+                  style={selectStyle}
+                >
+                  <option value="">All Packaging Types</option>
+                  {packagingFormats.map((packaging) => (
+                    <option key={packaging} value={packaging}>
+                      {packaging}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+  
+            <div style={chartCardStyle}>
+              <div style={{ marginBottom: "12px" }}>
+                <h3 style={{ margin: 0, fontSize: "20px", fontWeight: 700 }}>Forecast Trend</h3>
+                <p style={{ marginTop: "8px", marginBottom: 0, color: "#6b7280" }}>
+                  Filter by brand, channel, and packaging type to update the forecast view.
+                </p>
+              </div>
+  
+              <div style={{ width: "100%", height: 360 }}>
+                <ResponsiveContainer width="100%" height={320}>
+                  <LineChart data={chartData}>
+                    <CartesianGrid strokeDasharray="3 3" vertical={false} />
+                    <XAxis dataKey="week" />
+                    <YAxis />
+                    <Tooltip />
+                    <Legend />
+                    <Line
+                      type="monotone"
+                      dataKey="forecast"
+                      name="Forecast"
+                      stroke="#94a3b8"
+                      strokeWidth={3}
+                      dot={{ r: 3 }}
+                    />
+                    <Line
+                      type="monotone"
+                      dataKey="effective"
+                      name="Effective Plan"
+                      stroke="#2563eb"
+                      strokeWidth={3}
+                      dot={{ r: 4 }}
+                    />
+                  </LineChart>
+                </ResponsiveContainer>
+              </div>
+            </div>
+          </>
+        )}
       </>
     );
   }
@@ -608,6 +700,7 @@ export default function Home() {
   );
 }
 
+
 const filterGridStyle: React.CSSProperties = {
   display: "grid",
   gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
@@ -679,3 +772,5 @@ const inputStyle: React.CSSProperties = {
   fontSize: "13px",
   background: "white",
 };
+
+  
