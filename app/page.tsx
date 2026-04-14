@@ -89,15 +89,43 @@ export default function Home() {
 
   // --- DATA FETCHING ---
   useEffect(() => {
-    async function fetchLatestSession() {
-      const { data } = await supabase.from("planning_sessions").select("id, created_at").order("created_at", { ascending: false }).limit(1).single();
+  async function fetchLatestSession() {
+    try {
+      const { data, error } = await supabase
+        .from("planning_sessions")
+        .select("id, created_at")
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      if (error) {
+        setError(error.message);
+        setLoading(false);
+        return;
+      }
+
       if (data) {
         setSessionId(data.id);
-        setLatestForecastDate(new Date(data.created_at).toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric", year: "numeric" }));
+        setLatestForecastDate(
+          new Date(data.created_at).toLocaleDateString("en-US", {
+            weekday: "short",
+            month: "short",
+            day: "numeric",
+            year: "numeric",
+          })
+        );
+      } else {
+        setError("No planning session found. Create or load forecast data first.");
+        setLoading(false);
       }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to load latest session.");
+      setLoading(false);
     }
-    fetchLatestSession();
-  }, []);
+  }
+
+  fetchLatestSession();
+}, []);
 
   useEffect(() => {
     if (!sessionId) return;
