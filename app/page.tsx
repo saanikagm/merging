@@ -40,6 +40,18 @@ type PivotRow = {
   Week8: number | null;
 };
 
+type ProductLevelRow = {
+  brand: string;
+  Week1: number;
+  Week2: number;
+  Week3: number;
+  Week4: number;
+  Week5: number;
+  Week6: number;
+  Week7: number;
+  Week8: number;
+};
+
 const TABS = [
   "Overview",
   "Demand Plan",
@@ -93,19 +105,47 @@ export default function Home() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
-  const [latestForecastDate] = useState("Mon, Apr 13, 2026");
-  
+  const [latestForecastDate, setLatestForecastDate] = useState<string | null>(null);
+
   const [showDemandContent, setShowDemandContent] = useState(false);
 
-  const [sessionId, setSessionId] = useState("558f862e-1c64-49c2-968e-6d9274b71088");
+  const [sessionId, setSessionId] = useState("");
   const [isGenerating, setIsGenerating] = useState(false);
 
   const [productFilter, setProductFilter] = useState("");
   const [channelFilter, setChannelFilter] = useState("");
   const [packagingFilter, setPackagingFilter] = useState("");
+  const [demandViewLevel, setDemandViewLevel] = useState<"packaging" | "product">("packaging");
   
 
   useEffect(() => {
+    async function fetchLatestSession() {
+      const { data, error } = await supabase
+        .from("planning_sessions")
+        .select("id, created_at")
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .single();
+
+      if (error || !data) return;
+
+      setSessionId(data.id);
+      setLatestForecastDate(
+        new Date(data.created_at).toLocaleDateString("en-US", {
+          weekday: "short",
+          month: "short",
+          day: "numeric",
+          year: "numeric",
+        })
+      );
+    }
+
+    fetchLatestSession();
+  }, []);
+
+  useEffect(() => {
+    if (!sessionId) return;
+
     async function loadRows() {
       setLoading(true);
       setError("");
@@ -230,6 +270,27 @@ export default function Home() {
     });
 
     return Object.values(grouped);
+  }, [filteredRows]);
+
+  const productLevelRows = useMemo(() => {
+    const grouped: Record<string, ProductLevelRow> = {};
+
+    filteredRows.forEach((row) => {
+      if (!grouped[row.brand]) {
+        grouped[row.brand] = {
+          brand: row.brand,
+          Week1: 0, Week2: 0, Week3: 0, Week4: 0,
+          Week5: 0, Week6: 0, Week7: 0, Week8: 0,
+        };
+      }
+
+      if (row.week_number >= 1 && row.week_number <= 8) {
+        const key = `Week${row.week_number}` as keyof ProductLevelRow;
+        (grouped[row.brand][key] as number) += getEffectiveOrForecast(row);
+      }
+    });
+
+    return Object.values(grouped).sort((a, b) => a.brand.localeCompare(b.brand));
   }, [filteredRows]);
 
   const totalDemand = chartData.reduce((sum, row) => sum + row.effective, 0);
@@ -359,6 +420,45 @@ export default function Home() {
     } finally {
       setIsGenerating(false);
     }
+  }
+
+  function downloadDemandPlanCSV() {
+    let headers: string[];
+    let csvRows: string[][];
+
+    if (demandViewLevel === "product") {
+      headers = ["Brand", ...weekLabels];
+      csvRows = productLevelRows.map((row) => [
+        row.brand,
+        ...[1, 2, 3, 4, 5, 6, 7, 8].map((week) => {
+          const val = row[`Week${week}` as keyof ProductLevelRow];
+          return formatNumber(val as number);
+        }),
+      ]);
+    } else {
+      headers = ["Brand", "Channel", "Packaging", ...weekLabels];
+      csvRows = pivotRows.map((row) => [
+        row.brand,
+        row.channel,
+        row.packaging_format,
+        ...[1, 2, 3, 4, 5, 6, 7, 8].map((week) => {
+          const val = row[`Week${week}` as keyof PivotRow];
+          return val !== null && val !== undefined ? String(val) : "";
+        }),
+      ]);
+    }
+
+    const csvContent = [headers, ...csvRows]
+      .map((row) => row.map((cell) => `"${String(cell).replace(/"/g, '""')}"`).join(","))
+      .join("\n");
+
+    const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `demand-plan-${sessionId.slice(0, 8)}.csv`;
+    link.click();
+    URL.revokeObjectURL(url);
   }
 
   function renderPlaceholderTab(title: string) {
@@ -506,7 +606,7 @@ export default function Home() {
                 cursor: "pointer",
               }}
             >
-              {`Generate Demand Plan with Most Recent Forecast (${latestForecastDate})`}
+              {`Generate Demand Plan with Most Recent Forecast${latestForecastDate ? ` (${latestForecastDate})` : ""}`}
             </button>
   
             <button
@@ -530,77 +630,123 @@ export default function Home() {
         {showDemandContent && (
           <>
             <div style={tableCardStyle}>
-              <div style={{ padding: "24px 24px 0 24px" }}>
-                <h3 style={{ marginTop: 0, marginBottom: "8px", fontSize: "20px" }}>
-                  Editable Demand Table
-                </h3>
-                <p style={{ marginTop: 0, color: "#6b7280" }}>
-                  Edit a value and click outside the box to save it to Supabase as the effective plan.
-                </p>
-              </div>
-  
-              <div style={{ overflowX: "auto" }}>
-                <table
+              <div style={{ padding: "24px 24px 0 24px", display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+                <div>
+                  <h3 style={{ marginTop: 0, marginBottom: "8px", fontSize: "20px" }}>
+                    Editable Demand Table
+                  </h3>
+                  <p style={{ marginTop: 0, color: "#6b7280" }}>
+                    Edit a value and click outside the box to save it to Supabase as the effective plan.
+                  </p>
+                </div>
+                <button
+                  onClick={downloadDemandPlanCSV}
                   style={{
-                    width: "100%",
-                    minWidth: "1200px",
-                    borderCollapse: "collapse",
+                    background: "white",
+                    color: "#111827",
+                    border: "1px solid #d1d5db",
+                    borderRadius: "12px",
+                    padding: "10px 16px",
+                    fontWeight: 600,
+                    fontSize: "14px",
+                    cursor: "pointer",
+                    whiteSpace: "nowrap",
                   }}
                 >
-                  <thead>
-                    <tr style={{ background: "#f8fafc" }}>
-                      {[
-                        "Brand",
-                        "Channel",
-                        "Packaging",
-                        ...weekLabels,
-                      ].map((header) => (
-                        <th
-                          key={header}
-                          style={{
-                            textAlign: "left",
-                            padding: "14px 16px",
-                            borderBottom: "1px solid #e5e7eb",
-                            fontSize: "13px",
-                            fontWeight: 700,
-                            color: "#374151",
-                          }}
-                        >
-                          {header}
-                        </th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {pivotRows.map((row, index) => (
-                      <tr
-                        key={row.key}
-                        style={{
-                          background: index % 2 === 0 ? "white" : "#fcfcfd",
-                        }}
-                      >
-                        <td style={cellStyle}>{row.brand}</td>
-                        <td style={cellStyle}>{row.channel}</td>
-                        <td style={cellStyle}>{row.packaging_format}</td>
+                  Download CSV
+                </button>
+              </div>
   
-                        {[1, 2, 3, 4, 5, 6, 7, 8].map((week) => {
-                          const field = `Week${week}` as keyof PivotRow;
-                          return (
-                            <td key={week} style={cellStyle}>
-                              <input
-                                type="number"
-                                step="0.01"
-                                defaultValue={row[field] ?? ""}
-                                onBlur={(e) => handleCellUpdate(row, week, e.target.value)}
-                                style={inputStyle}
-                              />
-                            </td>
-                          );
-                        })}
+              <div style={{ padding: "12px 24px", display: "flex", gap: "8px", alignItems: "center" }}>
+                {(["packaging", "product"] as const).map((level) => (
+                  <button
+                    key={level}
+                    onClick={() => setDemandViewLevel(level)}
+                    style={{
+                      padding: "6px 14px",
+                      borderRadius: "8px",
+                      border: demandViewLevel === level ? "1px solid #111827" : "1px solid #e5e7eb",
+                      background: demandViewLevel === level ? "#111827" : "white",
+                      color: demandViewLevel === level ? "white" : "#6b7280",
+                      fontWeight: 600,
+                      fontSize: "13px",
+                      cursor: "pointer",
+                    }}
+                  >
+                    {level === "packaging" ? "By Product + Packaging" : "By Product Only"}
+                  </button>
+                ))}
+                {demandViewLevel === "product" && (
+                  <span style={{ fontSize: "12px", color: "#9ca3af", marginLeft: "8px" }}>
+                    Values are summed from segment forecasts — product-level model selection coming soon.
+                  </span>
+                )}
+              </div>
+
+              <div style={{ overflowX: "auto" }}>
+                {demandViewLevel === "packaging" ? (
+                  <table style={{ width: "100%", minWidth: "1200px", borderCollapse: "collapse" }}>
+                    <thead>
+                      <tr style={{ background: "#f8fafc" }}>
+                        {["Brand", "Channel", "Packaging", ...weekLabels].map((header) => (
+                          <th key={header} style={{ textAlign: "left", padding: "14px 16px", borderBottom: "1px solid #e5e7eb", fontSize: "13px", fontWeight: 700, color: "#374151" }}>
+                            {header}
+                          </th>
+                        ))}
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
+                    </thead>
+                    <tbody>
+                      {pivotRows.map((row, index) => (
+                        <tr key={row.key} style={{ background: index % 2 === 0 ? "white" : "#fcfcfd" }}>
+                          <td style={cellStyle}>{row.brand}</td>
+                          <td style={cellStyle}>{row.channel}</td>
+                          <td style={cellStyle}>{row.packaging_format}</td>
+                          {[1, 2, 3, 4, 5, 6, 7, 8].map((week) => {
+                            const field = `Week${week}` as keyof PivotRow;
+                            return (
+                              <td key={week} style={cellStyle}>
+                                <input
+                                  type="number"
+                                  step="0.01"
+                                  defaultValue={row[field] ?? ""}
+                                  onBlur={(e) => handleCellUpdate(row, week, e.target.value)}
+                                  style={inputStyle}
+                                />
+                              </td>
+                            );
+                          })}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                ) : (
+                  <table style={{ width: "100%", minWidth: "900px", borderCollapse: "collapse" }}>
+                    <thead>
+                      <tr style={{ background: "#f8fafc" }}>
+                        {["Brand", ...weekLabels].map((header) => (
+                          <th key={header} style={{ textAlign: "left", padding: "14px 16px", borderBottom: "1px solid #e5e7eb", fontSize: "13px", fontWeight: 700, color: "#374151" }}>
+                            {header}
+                          </th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {productLevelRows.map((row, index) => (
+                        <tr key={row.brand} style={{ background: index % 2 === 0 ? "white" : "#fcfcfd" }}>
+                          <td style={cellStyle}>{row.brand}</td>
+                          {[1, 2, 3, 4, 5, 6, 7, 8].map((week) => {
+                            const val = row[`Week${week}` as keyof ProductLevelRow] as number;
+                            return (
+                              <td key={week} style={{ ...cellStyle, fontVariantNumeric: "tabular-nums" }}>
+                                {formatNumber(val)}
+                              </td>
+                            );
+                          })}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
               </div>
             </div>
   
