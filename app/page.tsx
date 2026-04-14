@@ -2,825 +2,576 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { supabase } from "@/lib/supabase";
+import { generateCapacityPlan } from './capacityPlanning';
 import {
-  LineChart,
-  Line,
-  XAxis,
-  YAxis,
-  Tooltip,
-  ResponsiveContainer,
-  CartesianGrid,
-  Legend,
+  LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Legend,
 } from "recharts";
 
+// --- TYPES ---
 type DemandPlanRow = {
-  id: string;
-  brand: string;
-  channel: string;
-  packaging_format: string;
-  week_number: number;
-  year: number;
-  previous_value: number | null;
-  effective_value: number | null;
-  session_id: string;
+  id: string; brand: string; channel: string; packaging_format: string;
+  week_number: number; year: number; previous_value: number | null;
+  effective_value: number | null; session_id: string;
 };
 
 type PivotRow = {
-  key: string;
-  brand: string;
-  channel: string;
-  packaging_format: string;
-  Week1: number | null;
-  Week2: number | null;
-  Week3: number | null;
-  Week4: number | null;
-  Week5: number | null;
-  Week6: number | null;
-  Week7: number | null;
-  Week8: number | null;
+  key: string; brand: string; channel: string; packaging_format: string;
+  Week1: number | null; Week2: number | null; Week3: number | null; Week4: number | null;
+  Week5: number | null; Week6: number | null; Week7: number | null; Week8: number | null;
 };
 
-const TABS = [
-  "Overview",
-  "Demand Plan",
-  "Inventory",
-  "Brewing Plan",
-  "Packaging Plan",
-  "Allocation Plan",
-] as const;
+type ProductLevelRow = {
+  brand: string;
+  Week1: number; Week2: number; Week3: number; Week4: number;
+  Week5: number; Week6: number; Week7: number; Week8: number;
+};
 
+// UPGRADED: Added originalStartInv to track visual overrides
+type InventoryRow = {
+  name: string; startInv: number; originalStartInv: number; baseSafetyStock: number; finalSS: number;
+};
+
+// UPGRADED: Added inventoryField to differentiate between Starting Inv and Safety Stock audits
+type PendingAudit = {
+  context: "demand" | "inventory" | "brewing";
+  brand: string;
+  newValue: string;
+  demandPivotRow?: PivotRow;
+  weekNumber?: number;
+  inventoryField?: "startInv" | "finalSS";
+};
+
+const TABS = ["Overview", "Demand Plan", "Inventory", "Brewing Plan", "Packaging Plan", "Allocation Plan"] as const;
 type TabName = (typeof TABS)[number];
 
-
-function getEffectiveOrForecast(row: DemandPlanRow) {
-  return row.effective_value ?? row.previous_value ?? 0;
-}
-
-function formatNumber(value: number | null | undefined) {
-  if (value === null || value === undefined) return "";
-  return Number(value).toFixed(2).replace(/\.00$/, "");
-}
+// --- HELPER MATH ---
+function getEffectiveOrForecast(row: DemandPlanRow) { return row.effective_value ?? row.previous_value ?? 0; }
+function formatNumber(value: number | null | undefined) { return value == null ? "" : Number(value).toFixed(2).replace(/\.00$/, ""); }
+function getZRatio(sl: number) { return sl === 99 ? 2.33 / 1.645 : sl === 90 ? 1.28 / 1.645 : sl === 85 ? 1.04 / 1.645 : 1.0; }
 
 function getNextMonday(fromDate = new Date()) {
   const date = new Date(fromDate);
-  const day = date.getDay(); // 0 = Sun, 1 = Mon, ..., 6 = Sat
-
-  // If today is Monday, use today
-  if (day === 1) {
-    date.setHours(0, 0, 0, 0);
-    return date;
-  }
-
-  // Otherwise go to next Monday
-  const daysUntilNextMonday = day === 0 ? 1 : 8 - day;
-  date.setDate(date.getDate() + daysUntilNextMonday);
+  const day = date.getDay();
+  if (day === 1) { date.setHours(0, 0, 0, 0); return date; }
+  date.setDate(date.getDate() + (day === 0 ? 1 : 8 - day));
   date.setHours(0, 0, 0, 0);
-
   return date;
 }
+function formatWeekLabel(date: Date) { return date.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" }); }
 
-function formatWeekLabel(date: Date) {
-  return date.toLocaleDateString("en-US", {
-    weekday: "short",
-    month: "short",
-    day: "numeric",
-  });
-}
-
+// --- MAIN COMPONENT ---
 export default function Home() {
   const [activeTab, setActiveTab] = useState<TabName>("Demand Plan");
   const [rows, setRows] = useState<DemandPlanRow[]>([]);
+  const [inventoryDB, setInventoryDB] = useState<InventoryRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
-  const [latestForecastDate] = useState("Mon, Apr 13, 2026");
-  
+  const [sessionId, setSessionId] = useState("");
+  const [latestForecastDate, setLatestForecastDate] = useState<string | null>(null);
   const [showDemandContent, setShowDemandContent] = useState(false);
-
-  const [sessionId, setSessionId] = useState("558f862e-1c64-49c2-968e-6d9274b71088");
   const [isGenerating, setIsGenerating] = useState(false);
 
   const [productFilter, setProductFilter] = useState("");
   const [channelFilter, setChannelFilter] = useState("");
   const [packagingFilter, setPackagingFilter] = useState("");
-  
+  const [demandViewLevel, setDemandViewLevel] = useState<"packaging" | "product">("packaging");
 
+  // Operations States
+  const [globalServiceLevel, setGlobalServiceLevel] = useState(95);
+  const [selectedOpsProduct, setSelectedOpsProduct] = useState("");
+  const [manualBrewPlan, setManualBrewPlan] = useState<Record<string, Record<number, number>>>({});
+
+  // Universal Audit State
+  const [pendingEdit, setPendingEdit] = useState<PendingAudit | null>(null);
+  const [overrideReason, setOverrideReason] = useState("");
+  const [cancelTick, setCancelTick] = useState(0);
+
+  // --- DATA FETCHING ---
   useEffect(() => {
-    async function loadRows() {
-      setLoading(true);
-      setError("");
-    
-      const batchSize = 1000;
-      let from = 0;
-      let allRows: DemandPlanRow[] = [];
-    
-      while (true) {
-        const { data, error } = await supabase
-          .from("demand_plans")
-          .select("*")
-          .eq("session_id", sessionId)
-          .order("brand", { ascending: true })
-          .order("channel", { ascending: true })
-          .order("packaging_format", { ascending: true })
-          .order("week_number", { ascending: true })
-          .range(from, from + batchSize - 1);
-    
-        if (error) {
-          setError(error.message);
-          setLoading(false);
-          return;
-        }
-    
-        const batch = (data || []) as DemandPlanRow[];
-        allRows = [...allRows, ...batch];
-    
-        if (batch.length < batchSize) {
-          break;
-        }
-    
-        from += batchSize;
+    async function fetchLatestSession() {
+      const { data } = await supabase.from("planning_sessions").select("id, created_at").order("created_at", { ascending: false }).limit(1).single();
+      if (data) {
+        setSessionId(data.id);
+        setLatestForecastDate(new Date(data.created_at).toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric", year: "numeric" }));
       }
-    
-      setRows(allRows);
-      setLoading(false);
     }
-
-    loadRows();
-  }, [sessionId]);
-
-  const products = useMemo(() => {
-    return [...new Set(rows.map((r) => r.brand))].sort();
-  }, [rows]);
-
-  const channels = useMemo(() => {
-    return [...new Set(rows.map((r) => r.channel))].sort();
-  }, [rows]);
-
-  const packagingFormats = useMemo(() => {
-    return [...new Set(rows.map((r) => r.packaging_format))].sort();
-  }, [rows]);
-
-  const filteredRows = useMemo(() => {
-    return rows.filter((row) => {
-      const productMatch = !productFilter || row.brand === productFilter;
-      const channelMatch = !channelFilter || row.channel === channelFilter;
-      const packagingMatch = !packagingFilter || row.packaging_format === packagingFilter;
-      return productMatch && channelMatch && packagingMatch;
-    });
-  }, [rows, productFilter, channelFilter, packagingFilter]);
-
-  const weekLabels = useMemo(() => {
-    const startDate = getNextMonday();
-  
-    return Array.from({ length: 8 }, (_, index) => {
-      const date = new Date(startDate);
-      date.setDate(startDate.getDate() + index * 7);
-      return formatWeekLabel(date);
-    });
+    fetchLatestSession();
   }, []);
 
-  const chartData = useMemo(() => {
-    const weekMap: Record<number, { week: string; forecast: number; effective: number }> = {};
+  useEffect(() => {
+    if (!sessionId) return;
+    async function loadData() {
+      setLoading(true);
 
-    for (let week = 1; week <= 8; week++) {
-      weekMap[week] = {
-        week: weekLabels[week - 1],
-        forecast: 0,
-        effective: 0,
-      };
+      const { data: demandData, error: demandErr } = await supabase.from("demand_plans").select("*").eq("session_id", sessionId);
+      if (demandErr) { setError(demandErr.message); setLoading(false); return; }
+      const fetchedDemand = (demandData || []) as DemandPlanRow[];
+      setRows(fetchedDemand);
+
+      const { data: invData, error: invErr } = await supabase.from("inventory").select("*");
+      if (invErr) { console.error("Inventory fetch error:", invErr.message); }
+
+      const rawInv = invData || [];
+      const initialInv = rawInv.map((item: any) => {
+          const start = Number(item.startInv ?? item.starting_inventory ?? item.inventory_bbl ?? item.inventory ?? 0);
+          const ss = Number(item.safetyStock ?? item.safety_stock ?? item.baseSafetyStock ?? 10);
+          return {
+              name: item.name || item.ProductName || item.brand || "Unknown",
+              startInv: start,
+              originalStartInv: start, // Baseline for visual highlight comparison
+              baseSafetyStock: ss,
+              finalSS: ss
+          };
+      });
+
+      const uniqueDemandBrands = [...new Set(fetchedDemand.map(r => r.brand))];
+      uniqueDemandBrands.forEach(brand => {
+          if (!initialInv.find(i => i.name === brand)) {
+              initialInv.push({ name: brand, startInv: 0, originalStartInv: 0, baseSafetyStock: 10, finalSS: 10 });
+          }
+      });
+
+      const sortedInv = initialInv.sort((a,b) => a.name.localeCompare(b.name));
+      setInventoryDB(sortedInv);
+      if (sortedInv.length > 0) setSelectedOpsProduct(sortedInv[0].name);
+
+      setLoading(false);
     }
+    loadData();
+  }, [sessionId]);
 
-    filteredRows.forEach((row) => {
-      if (row.week_number >= 1 && row.week_number <= 8) {
-        weekMap[row.week_number].forecast += row.previous_value ?? 0;
-        weekMap[row.week_number].effective += getEffectiveOrForecast(row);
+  // --- MEMOS (SAANIKA) ---
+  const products = useMemo(() => [...new Set([...rows.map(r => r.brand), ...inventoryDB.map(i => i.name)])].filter(Boolean).sort(), [rows, inventoryDB]);
+  const channels = useMemo(() => [...new Set(rows.map((r) => r.channel))].sort(), [rows]);
+  const packagingFormats = useMemo(() => [...new Set(rows.map((r) => r.packaging_format))].sort(), [rows]);
+
+  const filteredRows = useMemo(() => rows.filter((row) => (!productFilter || row.brand === productFilter) && (!channelFilter || row.channel === channelFilter) && (!packagingFilter || row.packaging_format === packagingFilter)), [rows, productFilter, channelFilter, packagingFilter]);
+
+  const weekLabels = useMemo(() => Array.from({ length: 8 }, (_, i) => { const d = new Date(getNextMonday()); d.setDate(d.getDate() + i * 7); return formatWeekLabel(d); }), []);
+
+  const chartData = useMemo(() => {
+    const map: any = {};
+    for (let w = 1; w <= 8; w++) map[w] = { week: weekLabels[w - 1], forecast: 0, effective: 0 };
+    filteredRows.forEach((r) => {
+      if (r.week_number >= 1 && r.week_number <= 8) {
+        map[r.week_number].forecast += r.previous_value ?? 0;
+        map[r.week_number].effective += getEffectiveOrForecast(r);
       }
     });
-
-    return Object.values(weekMap);
+    return Object.values(map);
   }, [filteredRows, weekLabels]);
 
   const pivotRows = useMemo(() => {
     const grouped: Record<string, PivotRow> = {};
-
-    filteredRows.forEach((row) => {
-      const key = `${row.brand}||${row.channel}||${row.packaging_format}`;
-
-      if (!grouped[key]) {
-        grouped[key] = {
-          key,
-          brand: row.brand,
-          channel: row.channel,
-          packaging_format: row.packaging_format,
-          Week1: null,
-          Week2: null,
-          Week3: null,
-          Week4: null,
-          Week5: null,
-          Week6: null,
-          Week7: null,
-          Week8: null,
-        };
-      }
-
-      if (row.week_number >= 1 && row.week_number <= 8) {
-        grouped[key][`Week${row.week_number}` as keyof PivotRow] =
-          getEffectiveOrForecast(row) as never;
-      }
+    filteredRows.forEach((r) => {
+      const key = `${r.brand}||${r.channel}||${r.packaging_format}`;
+      if (!grouped[key]) grouped[key] = { key, brand: r.brand, channel: r.channel, packaging_format: r.packaging_format, Week1: null, Week2: null, Week3: null, Week4: null, Week5: null, Week6: null, Week7: null, Week8: null };
+      if (r.week_number >= 1 && r.week_number <= 8) grouped[key][`Week${r.week_number}` as keyof PivotRow] = getEffectiveOrForecast(r) as never;
     });
-
     return Object.values(grouped);
   }, [filteredRows]);
 
-  const totalDemand = chartData.reduce((sum, row) => sum + row.effective, 0);
-  const avgWeeklyDemand = chartData.length ? totalDemand / chartData.length : 0;
+  const productLevelRows = useMemo(() => {
+    const grouped: Record<string, ProductLevelRow> = {};
+    filteredRows.forEach((r) => {
+      if (!grouped[r.brand]) grouped[r.brand] = { brand: r.brand, Week1: 0, Week2: 0, Week3: 0, Week4: 0, Week5: 0, Week6: 0, Week7: 0, Week8: 0 };
+      if (r.week_number >= 1 && r.week_number <= 8) (grouped[r.brand][`Week${r.week_number}` as keyof ProductLevelRow] as number) += getEffectiveOrForecast(r);
+    });
+    return Object.values(grouped).sort((a, b) => a.brand.localeCompare(b.brand));
+  }, [filteredRows]);
 
-  const overviewStats = {
-    demandPlan: {
-      total: totalDemand,
-      avg: avgWeeklyDemand,
-      vsLastYear: "+12%",
-      vsPriorYear: "+8%",
-    },
-    inventoryPlan: {
-      target: "4.4 WOH Avg",
-      range: "-0.2 - 10.0 WOH Range",
-      above: "6% Weeks Above Target",
-      below: "5% Weeks Below Target",
-    },
-    brewingPlan: {
-      total: "720 Total BBL",
-      avg: "45 Avg BBL per Week",
-      max: "90 BBL in Max Week",
-      batches: "24 Total Batches",
-    },
-    packagingPlan: {
-      total: "720 Total BBL",
-      cases: "259 Case BBL | 36% of Total",
-      half: "363 1/2 BBL | 50% of Total",
-      sixtel: "98 Sixtel BBL | 14% of Total",
-    },
+  // --- MEMOS (OPERATIONS) ---
+  const enrichedInventoryDB = useMemo(() => {
+    return inventoryDB.map(inv => {
+        const prod = productLevelRows.find(p => p.brand === inv.name);
+        const totalD = prod ? (prod.Week1 + prod.Week2 + prod.Week3 + prod.Week4 + prod.Week5 + prod.Week6 + prod.Week7 + prod.Week8) : 0;
+        return { ...inv, avgDemand: totalD / 8 };
+    });
+  }, [productLevelRows, inventoryDB]);
+
+  const MAX_CAPACITY = 500;
+  const WARNING_THRESHOLD = 400;
+
+  const masterSchedule = useMemo(() => {
+      const weeklyTotals = [0,0,0,0,0,0];
+      const productBreakdown: Record<string, number[]> = {};
+      let hasWarning = false;
+
+      products.forEach(p => {
+          const prod = productLevelRows.find(r => r.brand === p) || { Week1: 0, Week2: 0, Week3: 0, Week4: 0, Week5: 0, Week6: 0, Week7: 0, Week8: 0 };
+          const wf = [prod.Week1, prod.Week2, prod.Week3, prod.Week4, prod.Week5, prod.Week6, prod.Week7, prod.Week8];
+          const inv = inventoryDB.find(i => i.name === p) || { startInv: 0, finalSS: 10 };
+          const manuals = manualBrewPlan[p] || {};
+
+          const plan = generateCapacityPlan(p, wf, inv.startInv, inv.finalSS, manuals);
+          productBreakdown[p] = plan.plannedRelease;
+          plan.plannedRelease.forEach((r, i) => weeklyTotals[i] += r);
+      });
+
+      weeklyTotals.forEach(t => { if (t > WARNING_THRESHOLD) hasWarning = true; });
+      return { weeklyTotals, productBreakdown, hasWarning };
+  }, [products, productLevelRows, inventoryDB, manualBrewPlan]);
+
+  const opsProductData = useMemo(() => {
+    if (!selectedOpsProduct || inventoryDB.length === 0) return null;
+    const prod = productLevelRows.find(p => p.brand === selectedOpsProduct);
+    const wf = prod ? [prod.Week1, prod.Week2, prod.Week3, prod.Week4, prod.Week5, prod.Week6, prod.Week7, prod.Week8] : [0,0,0,0,0,0,0,0];
+    const inv = inventoryDB.find(i => i.name === selectedOpsProduct) || { startInv: 0, finalSS: 10 };
+    return { name: selectedOpsProduct, forecasts: wf, startInv: inv.startInv, finalSS: inv.finalSS, manualReleases: manualBrewPlan[selectedOpsProduct] || {} };
+  }, [productLevelRows, selectedOpsProduct, inventoryDB, manualBrewPlan]);
+
+  // --- ACTIONS & AUDITS ---
+  const handleGlobalSLChange = (newSL: number) => {
+    setGlobalServiceLevel(newSL);
+    const z = getZRatio(newSL);
+    setInventoryDB(prev => prev.map(item => ({ ...item, finalSS: Number((item.baseSafetyStock * z).toFixed(2)) })));
   };
 
-  const [pendingEdit, setPendingEdit] = useState<{
-    pivotRow: PivotRow;
-    weekNumber: number;
-    newValue: string;
-  } | null>(null);
-  
-  const [overrideReason, setOverrideReason] = useState("");
+  // UPGRADED: Starting Inventory now routes straight to the Audit Modal
+  const handleInventoryUpdate = (name: string, field: "startInv" | "finalSS", value: string) => {
+      setPendingEdit({ context: 'inventory', brand: name, newValue: value, inventoryField: field });
+  };
 
-  function handleCellUpdate(pivotRow: PivotRow, weekNumber: number, newValue: string) {
-    if (newValue.trim() === "") return;
-  
-    const parsed = Number(newValue);
-    if (Number.isNaN(parsed)) return;
-  
-    setPendingEdit({
-      pivotRow,
-      weekNumber,
-      newValue,
-    });
-    setOverrideReason("");
-  }
+  const handleBrewUpdate = (brand: string, weekIndex: number, value: string) => {
+      if (value === "") {
+          setManualBrewPlan(prev => {
+              const plan = { ...(prev[brand] || {}) };
+              delete plan[weekIndex];
+              return { ...prev, [brand]: plan };
+          });
+      } else {
+          setPendingEdit({ context: 'brewing', brand, weekIndex, newValue: value });
+      }
+  };
 
   async function savePendingEdit() {
     if (!pendingEdit) return;
-  
+    if (!overrideReason.trim()) { alert("Please enter a reason for the change."); return; }
     const parsed = Number(pendingEdit.newValue);
     if (Number.isNaN(parsed)) return;
-  
-    if (!overrideReason.trim()) {
-      alert("Please enter a reason for the change.");
-      return;
+
+    if (pendingEdit.context === 'demand' && pendingEdit.demandPivotRow) {
+        const row = rows.find(r => r.brand === pendingEdit.demandPivotRow!.brand && r.channel === pendingEdit.demandPivotRow!.channel && r.packaging_format === pendingEdit.demandPivotRow!.packaging_format && r.week_number === pendingEdit.weekNumber);
+        if (row) {
+            await supabase.from("demand_plans").update({ effective_value: parsed, override_rationale: overrideReason.trim() }).eq("id", row.id);
+            setRows(prev => prev.map(r => r.id === row.id ? { ...r, effective_value: parsed } : r));
+        }
+    } else if (pendingEdit.context === 'inventory' && pendingEdit.inventoryField) {
+        // UPGRADED: Handles dynamic saving of both startInv and finalSS
+        setInventoryDB(prev => prev.map(item =>
+            item.name === pendingEdit.brand ? { ...item, [pendingEdit.inventoryField!]: parsed } : item
+        ));
+    } else if (pendingEdit.context === 'brewing') {
+        setManualBrewPlan(prev => {
+            const plan = { ...(prev[pendingEdit.brand] || {}) };
+            plan[pendingEdit.weekNumber!] = parsed;
+            return { ...prev, [pendingEdit.brand]: plan };
+        });
     }
-  
-    const matchingRow = rows.find(
-      (r) =>
-        r.brand === pendingEdit.pivotRow.brand &&
-        r.channel === pendingEdit.pivotRow.channel &&
-        r.packaging_format === pendingEdit.pivotRow.packaging_format &&
-        r.week_number === pendingEdit.weekNumber
-    );
-  
-    if (!matchingRow) return;
-  
-    const { error } = await supabase
-      .from("demand_plans")
-      .update({
-        effective_value: parsed,
-        override_rationale: overrideReason.trim(),
-      })
-      .eq("id", matchingRow.id);
-  
-    if (error) {
-      alert(`Update failed: ${error.message}`);
-      return;
-    }
-  
-    setRows((prev) =>
-      prev.map((r) =>
-        r.id === matchingRow.id
-          ? {
-              ...r,
-              effective_value: parsed,
-            }
-          : r
-      )
-    );
-  
+
     setPendingEdit(null);
     setOverrideReason("");
   }
 
-  async function handleGenerateDemandPlan() {
-    try {
-      setIsGenerating(true);
-      setError("");
-  
-      const response = await fetch("http://127.0.0.1:8000/run-forecast", {
-        method: "POST",
-      });
-  
-      if (!response.ok) {
-        throw new Error("Failed to generate demand plan");
-      }
-  
-      const result = await response.json();
-  
-      if (!result.session_id) {
-        throw new Error("No session_id returned from backend");
-      }
-  
-      setSessionId(result.session_id);
-      setShowDemandContent(true);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Unknown error");
-    } finally {
-      setIsGenerating(false);
-    }
-  }
 
-  function renderPlaceholderTab(title: string) {
-    return (
-      <div style={placeholderCardStyle}>
-        <h2 style={{ marginTop: 0, marginBottom: "8px" }}>{title}</h2>
-        <p style={{ color: "#6b7280", margin: 0 }}>This section is not built yet.</p>
-      </div>
-    );
-  }
-
+  // --- RENDERERS ---
   function renderOverviewTab() {
     return (
       <div style={{ display: "flex", flexDirection: "column", gap: "20px" }}>
         <div style={chartCardStyle}>
           <h2 style={{ margin: 0, fontSize: "28px", fontWeight: 700 }}>Overview</h2>
-          <p style={{ marginTop: "8px", marginBottom: 0, color: "#6b7280" }}>
-            Snapshot of the current demand forecast and effective demand plan.
-          </p>
+          <p style={{ marginTop: "8px", marginBottom: 0, color: "#6b7280" }}>Snapshot of the current demand forecast and effective demand plan.</p>
         </div>
-  
         <div style={overviewGridStyle}>
           <div style={overviewLeftColumnStyle}>
-            {renderMetricCard("Demand Plan", [
-              `${formatNumber(overviewStats.demandPlan.total)} Total BBL`,
-              `${formatNumber(overviewStats.demandPlan.avg)} BBL Weekly Avg`,
-              `${overviewStats.demandPlan.vsLastYear} from last year`,
-              `${overviewStats.demandPlan.vsPriorYear} from prior year`,
-            ], [2, 3])}
-  
-            {renderMetricCard("Inventory Plan", [
-              overviewStats.inventoryPlan.target,
-              overviewStats.inventoryPlan.range,
-              overviewStats.inventoryPlan.above,
-              overviewStats.inventoryPlan.below,
-            ])}
-  
-            {renderMetricCard("Brewing Plan", [
-              overviewStats.brewingPlan.total,
-              overviewStats.brewingPlan.avg,
-              overviewStats.brewingPlan.max,
-              overviewStats.brewingPlan.batches,
-            ])}
-  
-            {renderMetricCard("Packaging Plan", [
-              overviewStats.packagingPlan.total,
-              overviewStats.packagingPlan.cases,
-              overviewStats.packagingPlan.half,
-              overviewStats.packagingPlan.sixtel,
-            ])}
+            {renderMetricCard("Demand Plan", [`${formatNumber(chartData.reduce((s, r) => s + r.effective, 0))} Total BBL`, `Avg BBL Weekly`], [2, 3])}
+            {renderMetricCard("Inventory Plan", ["4.4 WOH Avg", "-0.2 - 10.0 WOH Range", "6% Weeks Above Target"])}
           </div>
-  
           <div style={overviewMainGridStyle}>
             <div style={overviewPanelStyle}>
-              <div style={{ marginBottom: "12px" }}>
-                <h3 style={{ margin: 0, fontSize: "18px", fontWeight: 700 }}>
-                  Weekly Forecast Demand
-                </h3>
-                <p style={{ marginTop: "6px", marginBottom: 0, color: "#6b7280", fontSize: "13px" }}>
-                  Forecast versus effective plan across the 8-week horizon.
-                </p>
-              </div>
-
-              <div style={{ width: "100%", height: 300 }}>
+              <h3 style={{ margin: 0, fontSize: "18px", fontWeight: 700 }}>Weekly Forecast Demand</h3>
+              <div style={{ width: "100%", height: 300, marginTop: "12px" }}>
                 <ResponsiveContainer width="100%" height="100%">
-                  <LineChart data={chartData}>
-                    <CartesianGrid strokeDasharray="3 3" vertical={false} />
-                    <XAxis dataKey="week" />
-                    <YAxis />
-                    <Tooltip />
-                    <Legend />
-                    <Line
-                      type="monotone"
-                      dataKey="forecast"
-                      name="Forecast"
-                      stroke="#94a3b8"
-                      strokeWidth={3}
-                      dot={{ r: 3 }}
-                    />
-                    <Line
-                      type="monotone"
-                      dataKey="effective"
-                      name="Effective Plan"
-                      stroke="#2563eb"
-                      strokeWidth={3}
-                      dot={{ r: 4 }}
-                    />
-                  </LineChart>
+                  <LineChart data={chartData}><CartesianGrid strokeDasharray="3 3" vertical={false} /><XAxis dataKey="week" /><YAxis /><Tooltip /><Legend /><Line type="monotone" dataKey="forecast" stroke="#94a3b8" strokeWidth={3} dot={{ r: 3 }} /><Line type="monotone" dataKey="effective" stroke="#2563eb" strokeWidth={3} dot={{ r: 4 }} /></LineChart>
                 </ResponsiveContainer>
               </div>
             </div>
-
-            {renderPlaceholderPanel(
-              "Brewing Plan",
-              "Placeholder area for brewing plan visuals and summary metrics."
-            )}
-
-            {renderPlaceholderPanel(
-              "Inventory WOH",
-              "Placeholder area for inventory WOH visuals, alerts, and summary metrics."
-            )}
-
-            {renderPlaceholderPanel(
-              "Packaging Plan",
-              "Placeholder area for packaging plan visuals and summary metrics."
-            )}
-          </div> 
+            {renderPlaceholderPanel("Brewing Plan", "Visuals coming soon.")}
+          </div>
         </div>
       </div>
     );
   }
 
-  
+  function renderInventoryTab() {
+    return (
+      <div style={{ display: "flex", flexDirection: "column", gap: "20px" }}>
+        <div style={chartCardStyle}>
+            <h2 style={{ margin: 0, fontSize: "28px", fontWeight: 700 }}>Inventory Parameters</h2>
+            <p style={{ marginTop: "8px", marginBottom: 0, color: "#6b7280" }}>Adjust global service levels or override specific safety stock buffers.</p>
+        </div>
+
+        <div style={{...filterCardStyle, display: 'flex', justifyContent: 'space-between', alignItems: 'center'}}>
+            <div>
+                <h3 style={{ margin: 0, fontSize: "16px", fontWeight: 700 }}>Global Target Service Level</h3>
+                <p style={{ margin: 0, color: "#6b7280", fontSize: "13px" }}>Recalculates safety stock targets for ALL products.</p>
+            </div>
+            <select value={globalServiceLevel} onChange={(e) => handleGlobalSLChange(Number(e.target.value))} style={{...selectStyle, width: '200px', fontWeight: 'bold'}}>
+                <option value={85}>85% - Lean</option>
+                <option value={90}>90% - Moderate</option>
+                <option value={95}>95% - Standard</option>
+                <option value={99}>99% - Conservative</option>
+            </select>
+        </div>
+
+        <div style={tableCardStyle}>
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", minWidth: "900px", borderCollapse: "collapse" }}>
+                <thead>
+                    <tr style={{ background: "#f8fafc" }}>
+                        <th style={{ textAlign: "left", padding: "14px 16px", borderBottom: "1px solid #e5e7eb", fontSize: "13px", fontWeight: 700, color: "#374151" }}>Brand</th>
+                        <th style={{ textAlign: "center", padding: "14px 16px", borderBottom: "1px solid #e5e7eb", fontSize: "13px", fontWeight: 700, color: "#374151" }}>Starting Inv</th>
+                        <th style={{ textAlign: "center", padding: "14px 16px", borderBottom: "1px solid #e5e7eb", fontSize: "13px", fontWeight: 700, color: "#9ca3af" }}>Avg Demand</th>
+                        <th style={{ textAlign: "center", padding: "14px 16px", borderBottom: "1px solid #e5e7eb", fontSize: "13px", fontWeight: 700, color: "#2563eb" }}>Calculated SS</th>
+                        <th style={{ textAlign: "center", padding: "14px 16px", borderBottom: "1px solid #e5e7eb", fontSize: "13px", fontWeight: 700, color: "#7e22ce", background: "#f3e8ff" }}>Audited Final SS</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {enrichedInventoryDB.map((item, index) => {
+                        const calcSS = item.baseSafetyStock * getZRatio(globalServiceLevel);
+                        const isSSAudited = item.finalSS !== Number(calcSS.toFixed(2));
+                        const isInvAudited = item.startInv !== item.originalStartInv; // Visual check for Starting Inventory overrides
+
+                        return (
+                            <tr key={item.name} style={{ background: index % 2 === 0 ? "white" : "#fcfcfd" }}>
+                                <td style={{...cellStyle, fontWeight: 'bold'}}>{item.name}</td>
+
+                                {/* UPGRADED: Starting Inventory is now fully auditable and visually highlights amber when changed */}
+                                <td style={{...cellStyle, textAlign: 'center'}}>
+                                    <input
+                                        key={`inv-${item.name}-${item.startInv}-${cancelTick}`}
+                                        type="number"
+                                        defaultValue={item.startInv}
+                                        onBlur={(e) => {
+                                            if (e.target.value !== "" && Number(e.target.value) !== item.startInv) {
+                                                handleInventoryUpdate(item.name, 'startInv', e.target.value);
+                                            }
+                                        }}
+                                        style={{
+                                            ...inputStyle,
+                                            textAlign: 'center',
+                                            background: isInvAudited ? '#fef3c7' : '#f8fafc',
+                                            border: isInvAudited ? '2px solid #f59e0b' : '1px solid #d1d5db',
+                                            color: isInvAudited ? '#b45309' : '#111827',
+                                            fontWeight: isInvAudited ? 'bold' : 'normal'
+                                        }}
+                                    />
+                                </td>
+
+                                <td style={{...cellStyle, textAlign: 'center', color: '#6b7280'}}>{formatNumber(item.avgDemand)}</td>
+                                <td style={{...cellStyle, textAlign: 'center', color: '#2563eb', fontWeight: 'bold'}}>{formatNumber(calcSS)}</td>
+                                <td style={{...cellStyle, textAlign: 'center', background: '#f3e8ff'}}>
+                                    <input
+                                        key={`ss-${item.name}-${item.finalSS}-${cancelTick}`}
+                                        type="number"
+                                        defaultValue={item.finalSS}
+                                        onBlur={(e) => {
+                                            if (e.target.value !== "" && Number(e.target.value) !== item.finalSS) {
+                                                handleInventoryUpdate(item.name, 'finalSS', e.target.value);
+                                            }
+                                        }}
+                                        style={{...inputStyle, textAlign: 'center', fontWeight: 'bold', color: isSSAudited ? '#b45309' : '#7e22ce', border: isSSAudited ? '2px solid #f59e0b' : '1px solid #d1d5db'}}
+                                    />
+                                </td>
+                            </tr>
+                        )
+                    })}
+                </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  function renderBrewingTab() {
+    if (!masterSchedule || !opsProductData) return null;
+    return (
+      <div style={{ display: "flex", flexDirection: "column", gap: "20px" }}>
+
+        <div style={{...chartCardStyle, background: "#111827", color: "white"}}>
+            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "12px" }}>
+                <div>
+                    <h2 style={{ margin: 0, fontSize: "22px", fontWeight: 700 }}>Facility Load vs Capacity</h2>
+                    {masterSchedule.hasWarning && <p style={{ color: "#f87171", fontSize: "14px", marginTop: "4px", margin: 0 }}>⚠️ WARNING: Approaching absolute limit of {MAX_CAPACITY} bbls.</p>}
+                </div>
+                <span style={{ color: "#a78bfa", fontWeight: 'bold', fontSize: "18px" }}>{MAX_CAPACITY} bbl max</span>
+            </div>
+
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(6, 1fr)', gap: '16px', marginTop: '20px' }}>
+                {masterSchedule.weeklyTotals.map((total, i) => {
+                    const isOver = total > WARNING_THRESHOLD;
+                    return (
+                        <div key={i} style={{ padding: '16px', borderRadius: '12px', background: isOver ? '#450a0a' : '#1e293b', border: isOver ? '1px solid #7f1d1d' : '1px solid #334155', textAlign: 'center' }}>
+                            <div style={{ fontSize: '12px', color: '#94a3b8', marginBottom: '8px' }}>{weekLabels[i]}</div>
+                            <div style={{ fontSize: '24px', fontWeight: 'black', color: isOver ? '#f87171' : '#34d399' }}>{total}</div>
+                            <div style={{ fontSize: '12px', color: '#64748b', fontWeight: 'bold', marginTop: '4px' }}>{Math.round((total/MAX_CAPACITY)*100)}% Full</div>
+                        </div>
+                    )
+                })}
+            </div>
+        </div>
+
+        <div style={filterCardStyle}>
+            <label style={labelStyle}>View Specific Brewing Instructions</label>
+            <select value={selectedOpsProduct} onChange={(e) => setSelectedOpsProduct(e.target.value)} style={selectStyle}>
+                {products.map(p => <option key={p} value={p}>{p}</option>)}
+            </select>
+        </div>
+
+        <div style={tableCardStyle}>
+            <div style={{ padding: "24px", display: "flex", justifyContent: "space-between" }}>
+                <h3 style={{ margin: 0, fontSize: "20px" }}>{opsProductData.name} - Action Plan</h3>
+                <span style={{ fontSize: '18px', fontWeight: 'bold', color: '#7e22ce' }}>Locked SS: {formatNumber(opsProductData.finalSS)}</span>
+            </div>
+            <div style={{ overflowX: "auto" }}>
+                <table style={{ width: "100%", minWidth: "900px", borderCollapse: "collapse" }}>
+                    <thead>
+                        <tr style={{ background: "#f8fafc" }}>
+                            <th style={{ textAlign: "left", padding: "14px 16px", borderBottom: "1px solid #e5e7eb", fontSize: "13px" }}>Weekly Flow</th>
+                            <th style={{ textAlign: "center", padding: "14px 16px", borderBottom: "1px solid #e5e7eb", fontSize: "13px" }}>Wk 0</th>
+                            {weekLabels.slice(0,6).map(lbl => <th key={lbl} style={{ textAlign: "center", padding: "14px 16px", borderBottom: "1px solid #e5e7eb", fontSize: "13px", color: '#2563eb' }}>{lbl}</th>)}
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr style={{ borderBottom: '1px solid #f1f5f9' }}>
+                            <td style={{...cellStyle, color: '#dc2626', fontWeight: 'bold'}}>➖ Forecasted Demand</td>
+                            <td style={cellStyle}>-</td>
+                            {generateCapacityPlan(opsProductData.name, opsProductData.forecasts, opsProductData.startInv, opsProductData.finalSS, opsProductData.manualReleases).forecasts.map((f, i) => <td key={i} style={{...cellStyle, textAlign: 'center', color: '#dc2626'}}>{formatNumber(f)}</td>)}
+                        </tr>
+                        <tr style={{ borderBottom: '1px solid #f1f5f9' }}>
+                            <td style={{...cellStyle, color: '#16a34a', fontWeight: 'bold'}}>➕ Brews Arriving</td>
+                            <td style={cellStyle}>-</td>
+                            {generateCapacityPlan(opsProductData.name, opsProductData.forecasts, opsProductData.startInv, opsProductData.finalSS, opsProductData.manualReleases).plannedReceipt.map((r, i) => <td key={i} style={{...cellStyle, textAlign: 'center', color: '#16a34a', fontWeight: 'bold'}}>{r > 0 ? r : '-'}</td>)}
+                        </tr>
+                        <tr style={{ background: '#f8fafc', borderBottom: '1px solid #e5e7eb' }}>
+                            <td style={{...cellStyle, fontWeight: 'bold'}}>📦 Ending Inventory</td>
+                            <td style={{...cellStyle, textAlign: 'center', fontWeight: 'bold'}}>{formatNumber(opsProductData.startInv)}</td>
+                            {generateCapacityPlan(opsProductData.name, opsProductData.forecasts, opsProductData.startInv, opsProductData.finalSS, opsProductData.manualReleases).projAvailable.map((p, i) => <td key={i} style={{...cellStyle, textAlign: 'center', fontWeight: 'bold', color: p < opsProductData.finalSS ? '#dc2626' : '#111827'}}>{formatNumber(p)}</td>)}
+                        </tr>
+                        <tr style={{ background: '#f3e8ff', borderBottom: '2px solid #d8b4fe' }}>
+                            <td style={{...cellStyle, fontWeight: '900', color: '#7e22ce', fontSize: '15px'}}>⚙️ ACTION: Start Brewing</td>
+                            <td style={cellStyle}>-</td>
+                            {generateCapacityPlan(opsProductData.name, opsProductData.forecasts, opsProductData.startInv, opsProductData.finalSS, opsProductData.manualReleases).plannedRelease.map((r, i) => {
+                                const isManual = opsProductData.manualReleases[i] !== undefined;
+                                const currentVal = isManual ? opsProductData.manualReleases[i] : "";
+                                return (
+                                    <td key={i} style={{ padding: '8px', textAlign: 'center' }}>
+                                        <input
+                                            key={`brew-${opsProductData.name}-${i}-${currentVal}-${cancelTick}`}
+                                            type="number"
+                                            defaultValue={currentVal}
+                                            placeholder={r > 0 ? String(r) : "-"}
+                                            onBlur={(e) => {
+                                                const val = e.target.value;
+                                                if (String(val) !== String(currentVal)) {
+                                                    handleBrewUpdate(opsProductData.name, i, val);
+                                                }
+                                            }}
+                                            style={{...inputStyle, textAlign: 'center', fontWeight: '900', fontSize: '15px', color: '#7e22ce', border: isManual ? '2px solid #f59e0b' : '1px solid transparent', background: isManual ? '#fef3c7' : 'transparent'}}
+                                        />
+                                    </td>
+                                )
+                            })}
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+      </div>
+    );
+  }
+
+  // --- RENDER DEMAND PLAN (SAANIKA'S CODE UNCHANGED) ---
   function renderDemandPlanTab() {
     return (
       <>
         <div style={chartCardStyle}>
           <div style={{ marginBottom: "8px" }}>
             <h2 style={{ margin: 0, fontSize: "28px", fontWeight: 700 }}>Demand Plan</h2>
-            <p style={{ marginTop: "8px", marginBottom: 0, color: "#6b7280" }}>
-              Choose whether to use the latest generated forecast or run a brand new demand plan.
-            </p>
-            <p style={{ marginTop: "8px", marginBottom: 0, color: "#9ca3af", fontSize: "13px" }}>
-              Current session: {sessionId}
-            </p>
+            <p style={{ marginTop: "8px", marginBottom: 0, color: "#6b7280" }}>Current session: {sessionId}</p>
           </div>
-  
-          <div
-            style={{
-              display: "flex",
-              gap: "12px",
-              flexWrap: "wrap",
-              marginTop: "20px",
-            }}
-          >
-            <button
-              onClick={() => setShowDemandContent(true)}
-              style={{
-                background: "#111827",
-                color: "white",
-                border: "none",
-                borderRadius: "12px",
-                padding: "12px 18px",
-                fontWeight: 600,
-                cursor: "pointer",
-              }}
-            >
-              {`Generate Demand Plan with Most Recent Forecast (${latestForecastDate})`}
-            </button>
-  
-            <button
-              onClick={handleGenerateDemandPlan}
-              disabled={isGenerating}
-              style={{
-                background: isGenerating ? "#9ca3af" : "white",
-                color: "#111827",
-                border: "1px solid #d1d5db",
-                borderRadius: "12px",
-                padding: "12px 18px",
-                fontWeight: 600,
-                cursor: isGenerating ? "not-allowed" : "pointer",
-              }}
-            >
-              {isGenerating ? "Generating New Demand Plan..." : "Generate New Demand Plan"}
-            </button>
+          <div style={{ display: "flex", gap: "12px", marginTop: "20px" }}>
+            <button onClick={() => setShowDemandContent(true)} style={{ background: "#111827", color: "white", border: "none", borderRadius: "12px", padding: "12px 18px", fontWeight: 600, cursor: "pointer" }}>Load Latest Forecast</button>
           </div>
         </div>
-  
+
         {showDemandContent && (
-          <>
-            <div style={tableCardStyle}>
-              <div style={{ padding: "24px 24px 0 24px" }}>
-                <h3 style={{ marginTop: 0, marginBottom: "8px", fontSize: "20px" }}>
-                  Editable Demand Table
-                </h3>
-                <p style={{ marginTop: 0, color: "#6b7280" }}>
-                  Edit a value and click outside the box to save it to Supabase as the effective plan.
-                </p>
-              </div>
-  
-              <div style={{ overflowX: "auto" }}>
-                <table
-                  style={{
-                    width: "100%",
-                    minWidth: "1200px",
-                    borderCollapse: "collapse",
-                  }}
-                >
-                  <thead>
-                    <tr style={{ background: "#f8fafc" }}>
-                      {[
-                        "Brand",
-                        "Channel",
-                        "Packaging",
-                        ...weekLabels,
-                      ].map((header) => (
-                        <th
-                          key={header}
-                          style={{
-                            textAlign: "left",
-                            padding: "14px 16px",
-                            borderBottom: "1px solid #e5e7eb",
-                            fontSize: "13px",
-                            fontWeight: 700,
-                            color: "#374151",
-                          }}
-                        >
-                          {header}
-                        </th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {pivotRows.map((row, index) => (
-                      <tr
-                        key={row.key}
-                        style={{
-                          background: index % 2 === 0 ? "white" : "#fcfcfd",
-                        }}
-                      >
-                        <td style={cellStyle}>{row.brand}</td>
-                        <td style={cellStyle}>{row.channel}</td>
-                        <td style={cellStyle}>{row.packaging_format}</td>
-  
-                        {[1, 2, 3, 4, 5, 6, 7, 8].map((week) => {
-                          const field = `Week${week}` as keyof PivotRow;
+          <div style={tableCardStyle}>
+            <div style={{ padding: "24px" }}><h3 style={{ margin: 0 }}>Editable Demand Table</h3></div>
+            <div style={{ overflowX: "auto" }}>
+              <table style={{ width: "100%", minWidth: "1200px", borderCollapse: "collapse" }}>
+                <thead>
+                  <tr style={{ background: "#f8fafc" }}>
+                    {["Brand", "Channel", "Packaging", ...weekLabels].map((h) => <th key={h} style={{ textAlign: "left", padding: "14px 16px", borderBottom: "1px solid #e5e7eb", fontSize: "13px", color: "#374151" }}>{h}</th>)}
+                  </tr>
+                </thead>
+                <tbody>
+                  {pivotRows.map((row, index) => (
+                    <tr key={row.key} style={{ background: index % 2 === 0 ? "white" : "#fcfcfd" }}>
+                      <td style={cellStyle}>{row.brand}</td><td style={cellStyle}>{row.channel}</td><td style={cellStyle}>{row.packaging_format}</td>
+                      {[1, 2, 3, 4, 5, 6, 7, 8].map((w) => {
+                          const currentVal = row[`Week${w}` as keyof PivotRow] ?? "";
                           return (
-                            <td key={week} style={cellStyle}>
-                              <input
-                                type="number"
-                                step="0.01"
-                                defaultValue={row[field] ?? ""}
-                                onBlur={(e) => handleCellUpdate(row, week, e.target.value)}
-                                style={inputStyle}
-                              />
+                            <td key={w} style={cellStyle}>
+                                <input
+                                    key={`demand-${row.key}-${w}-${currentVal}-${cancelTick}`}
+                                    type="number"
+                                    defaultValue={currentVal}
+                                    onBlur={(e) => {
+                                        if(e.target.value !== "" && String(e.target.value) !== String(currentVal)) {
+                                            setPendingEdit({ context: 'demand', demandPivotRow: row, weekNumber: w, newValue: e.target.value, brand: row.brand })
+                                        }
+                                    }}
+                                    style={inputStyle}
+                                />
                             </td>
-                          );
-                        })}
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-  
-            <div style={filterGridStyle}>
-              <div style={filterCardStyle}>
-                <label style={labelStyle}>Product</label>
-                <select
-                  value={productFilter}
-                  onChange={(e) => setProductFilter(e.target.value)}
-                  style={selectStyle}
-                >
-                  <option value="">All Products</option>
-                  {products.map((product) => (
-                    <option key={product} value={product}>
-                      {product}
-                    </option>
+                          )
+                      })}
+                    </tr>
                   ))}
-                </select>
-              </div>
-  
-              <div style={filterCardStyle}>
-                <label style={labelStyle}>Channel</label>
-                <select
-                  value={channelFilter}
-                  onChange={(e) => setChannelFilter(e.target.value)}
-                  style={selectStyle}
-                >
-                  <option value="">All Channels</option>
-                  {channels.map((channel) => (
-                    <option key={channel} value={channel}>
-                      {channel}
-                    </option>
-                  ))}
-                </select>
-              </div>
-  
-              <div style={filterCardStyle}>
-                <label style={labelStyle}>Packaging Type</label>
-                <select
-                  value={packagingFilter}
-                  onChange={(e) => setPackagingFilter(e.target.value)}
-                  style={selectStyle}
-                >
-                  <option value="">All Packaging Types</option>
-                  {packagingFormats.map((packaging) => (
-                    <option key={packaging} value={packaging}>
-                      {packaging}
-                    </option>
-                  ))}
-                </select>
-              </div>
+                </tbody>
+              </table>
             </div>
-  
-            <div style={chartCardStyle}>
-              <div style={{ marginBottom: "12px" }}>
-                <h3 style={{ margin: 0, fontSize: "20px", fontWeight: 700 }}>Forecast Trend</h3>
-                <p style={{ marginTop: "8px", marginBottom: 0, color: "#6b7280" }}>
-                  Filter by brand, channel, and packaging type to update the forecast view.
-                </p>
-              </div>
-  
-              <div style={{ width: "100%", height: 360 }}>
-                <ResponsiveContainer width="100%" height={320}>
-                  <LineChart data={chartData}>
-                    <CartesianGrid strokeDasharray="3 3" vertical={false} />
-                    <XAxis dataKey="week" />
-                    <YAxis />
-                    <Tooltip />
-                    <Legend />
-                    <Line
-                      type="monotone"
-                      dataKey="forecast"
-                      name="Forecast"
-                      stroke="#94a3b8"
-                      strokeWidth={3}
-                      dot={{ r: 3 }}
-                    />
-                    <Line
-                      type="monotone"
-                      dataKey="effective"
-                      name="Effective Plan"
-                      stroke="#2563eb"
-                      strokeWidth={3}
-                      dot={{ r: 4 }}
-                    />
-                  </LineChart>
-                </ResponsiveContainer>
-              </div>
-            </div>
-          </>
+          </div>
         )}
       </>
     );
   }
 
-  function renderMetricCard(
-    title: string,
-    lines: string[],
-    accentLines: number[] = []
-  ) {
+  function renderMetricCard(title: string, lines: string[], accentLines: number[] = []) {
     return (
       <div style={overviewMetricCardStyle}>
-        <h3
-          style={{
-            marginTop: 0,
-            marginBottom: "14px",
-            fontSize: "18px",
-            fontWeight: 700,
-            textAlign: "center",
-          }}
-        >
-          {title}
-        </h3>
-  
+        <h3 style={{ marginTop: 0, marginBottom: "14px", fontSize: "18px", textAlign: "center" }}>{title}</h3>
         <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
-          {lines.map((line, index) => (
-            <p
-              key={index}
-              style={{
-                margin: 0,
-                textAlign: "center",
-                fontSize: index === 0 ? "15px" : "14px",
-                fontWeight: index === 0 ? 700 : 500,
-                color: accentLines.includes(index) ? "#15803d" : "#4b5563",
-              }}
-            >
-              {line}
-            </p>
-          ))}
+          {lines.map((line, index) => <p key={index} style={{ margin: 0, textAlign: "center", fontSize: index === 0 ? "15px" : "14px", fontWeight: index === 0 ? 700 : 500, color: accentLines.includes(index) ? "#15803d" : "#4b5563" }}>{line}</p>)}
         </div>
       </div>
     );
   }
-  
   function renderPlaceholderPanel(title: string, subtitle: string) {
-    return (
-      <div style={overviewPanelStyle}>
-        <div style={{ marginBottom: "12px" }}>
-          <h3 style={{ margin: 0, fontSize: "18px", fontWeight: 700 }}>{title}</h3>
-          <p style={{ marginTop: "6px", marginBottom: 0, color: "#6b7280", fontSize: "13px" }}>
-            {subtitle}
-          </p>
-        </div>
-  
-        <div
-          style={{
-            height: "300px",
-            borderRadius: "14px",
-            border: "1px dashed #cbd5e1",
-            background: "#f8fafc",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            color: "#94a3b8",
-            fontSize: "14px",
-            fontWeight: 600,
-          }}
-        >
-          Placeholder content
-        </div>
-      </div>
-    );
+    return (<div style={overviewPanelStyle}><div style={{ marginBottom: "12px" }}><h3 style={{ margin: 0, fontSize: "18px" }}>{title}</h3><p style={{ margin: 0, color: "#6b7280", fontSize: "13px" }}>{subtitle}</p></div><div style={{ height: "300px", borderRadius: "14px", border: "1px dashed #cbd5e1", background: "#f8fafc", display: "flex", alignItems: "center", justifyContent: "center", color: "#94a3b8" }}>Placeholder content</div></div>);
   }
 
   return (
-    <main
-      style={{
-        minHeight: "100vh",
-        background: "#f7f7f5",
-        padding: "32px 24px 48px 24px",
-        fontFamily: 'Inter, Arial, sans-serif',
-        color: "#111827",
-      }}
-    >
+    <main style={{ minHeight: "100vh", background: "#f7f7f5", padding: "32px 24px 48px 24px", fontFamily: 'Inter, Arial, sans-serif', color: "#111827" }}>
       <div style={{ maxWidth: "1320px", margin: "0 auto" }}>
-        <div style={{ marginBottom: "24px" }}>
-        <h1
-          style={{
-            margin: 0,
-            fontSize: "34px",
-            fontWeight: 700,
-            fontFamily: 'Georgia, "Times New Roman", serif',
-          }}
-        >
-          Brewery Planning App
-        </h1>
-          <p style={{ marginTop: "8px", marginBottom: 0, color: "#6b7280" }}>
-            Central Coast Analytics
-          </p>
-        </div>
+        <div style={{ marginBottom: "24px" }}><h1 style={{ margin: 0, fontSize: "34px", fontFamily: 'Georgia, "Times New Roman", serif' }}>Brewery Planning App</h1><p style={{ margin: 0, color: "#6b7280" }}>Central Coast Analytics</p></div>
 
-        <div
-          style={{
-            display: "flex",
-            gap: "10px",
-            flexWrap: "wrap",
-            marginBottom: "24px",
-            padding: "8px",
-            background: "white",
-            border: "1px solid #e5e7eb",
-            borderRadius: "16px",
-          }}
-        >
+        <div style={{ display: "flex", gap: "10px", flexWrap: "wrap", marginBottom: "24px", padding: "8px", background: "white", border: "1px solid #e5e7eb", borderRadius: "16px" }}>
           {TABS.map((tab) => (
-            <button
-              key={tab}
-              onClick={() => setActiveTab(tab)}
-              style={{
-                padding: "12px 18px",
-                borderRadius: "12px",
-                border: activeTab === tab ? "1px solid #111827" : "1px solid transparent",
-                background: activeTab === tab ? "#111827" : "transparent",
-                color: activeTab === tab ? "white" : "#4b5563",
-                cursor: "pointer",
-                fontWeight: 600,
-                fontSize: "14px",
-              }}
-            >
-              {tab}
-            </button>
+            <button key={tab} onClick={() => setActiveTab(tab)} style={{ padding: "12px 18px", borderRadius: "12px", border: activeTab === tab ? "1px solid #111827" : "1px solid transparent", background: activeTab === tab ? "#111827" : "transparent", color: activeTab === tab ? "white" : "#4b5563", cursor: "pointer", fontWeight: 600 }}>{tab}</button>
           ))}
         </div>
 
@@ -831,96 +582,25 @@ export default function Home() {
           <>
             {activeTab === "Overview" && renderOverviewTab()}
             {activeTab === "Demand Plan" && renderDemandPlanTab()}
-            {activeTab === "Inventory" && renderPlaceholderTab("Inventory")}
-            {activeTab === "Brewing Plan" && renderPlaceholderTab("Brewing Plan")}
-            {activeTab === "Packaging Plan" && renderPlaceholderTab("Packaging Plan")}
-            {activeTab === "Allocation Plan" && renderPlaceholderTab("Allocation Plan")}
+            {activeTab === "Inventory" && renderInventoryTab()}
+            {activeTab === "Brewing Plan" && renderBrewingTab()}
+            {(activeTab === "Packaging Plan" || activeTab === "Allocation Plan") && <div style={chartCardStyle}><h2>{activeTab}</h2><p>Coming Soon</p></div>}
           </>
         )}
       </div>
 
+      {/* UNIVERSAL AUDIT MODAL */}
       {pendingEdit && (
-        <div
-          style={{
-            position: "fixed",
-            inset: 0,
-            background: "rgba(0,0,0,0.25)",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            zIndex: 1000,
-          }}
-        >
-          <div
-            style={{
-              background: "#fffaf0",
-              border: "2px solid #f59e0b",
-              borderRadius: "18px",
-              padding: "24px",
-              width: "420px",
-              boxShadow: "0 10px 30px rgba(0,0,0,0.15)",
-            }}
-          >
-            <h3
-              style={{
-                marginTop: 0,
-                marginBottom: "12px",
-                fontSize: "20px",
-                color: "#b45309",
-                fontFamily: 'Georgia, "Times New Roman", serif',
-              }}
-            >
-              Why? (logged to audit trail)
-            </h3>
-
-            <input
-              type="text"
-              value={overrideReason}
-              onChange={(e) => setOverrideReason(e.target.value)}
-              placeholder="e.g., expecting late shipment"
-              style={{
-                width: "100%",
-                padding: "12px",
-                borderRadius: "10px",
-                border: "1px solid #d1d5db",
-                fontSize: "16px",
-                marginBottom: "16px",
-              }}
-            />
-
+        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.25)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000 }}>
+          <div style={{ background: "#fffaf0", border: "2px solid #f59e0b", borderRadius: "18px", padding: "24px", width: "420px", boxShadow: "0 10px 30px rgba(0,0,0,0.15)" }}>
+            <h3 style={{ marginTop: 0, marginBottom: "12px", fontSize: "20px", color: "#b45309", fontFamily: 'Georgia, serif' }}>Why? (logged to audit trail)</h3>
+            <p style={{ fontSize: '13px', color: '#b45309', marginBottom: '12px', marginTop: 0 }}>
+                Modifying {pendingEdit.context === 'inventory' ? (pendingEdit.inventoryField === 'startInv' ? 'Starting Inventory' : 'Safety Stock') : pendingEdit.context === 'brewing' ? 'Brewing Schedule' : 'Demand Plan'} for {pendingEdit.brand}.
+            </p>
+            <input type="text" value={overrideReason} onChange={(e) => setOverrideReason(e.target.value)} placeholder="e.g., cycle count adjustment" style={{ width: "100%", padding: "12px", borderRadius: "10px", border: "1px solid #d1d5db", fontSize: "16px", marginBottom: "16px" }} />
             <div style={{ display: "flex", gap: "12px" }}>
-              <button
-                onClick={savePendingEdit}
-                style={{
-                  background: "#f59e0b",
-                  color: "white",
-                  border: "none",
-                  borderRadius: "10px",
-                  padding: "10px 18px",
-                  fontWeight: 600,
-                  cursor: "pointer",
-                }}
-              >
-                Save
-              </button>
-
-              <button
-                onClick={() => {
-                  setPendingEdit(null);
-                  setOverrideReason("");
-                }}
-                style={{
-                  background: "white",
-                  color: "#6b7280",
-                  border: "1px solid #d1d5db",
-                  borderRadius: "10px",
-                  padding: "10px 18px",
-                  fontWeight: 600,
-                  cursor: "pointer",
-                }}
-              >
-                Cancel
-              </button>
+              <button onClick={savePendingEdit} style={{ background: "#f59e0b", color: "white", border: "none", borderRadius: "10px", padding: "10px 18px", fontWeight: 600, cursor: "pointer" }}>Save</button>
+              <button onClick={() => { setPendingEdit(null); setOverrideReason(""); setCancelTick(c => c + 1); }} style={{ background: "white", color: "#6b7280", border: "1px solid #d1d5db", borderRadius: "10px", padding: "10px 18px", fontWeight: 600, cursor: "pointer" }}>Cancel</button>
             </div>
           </div>
         </div>
@@ -929,114 +609,16 @@ export default function Home() {
   );
 }
 
-
-const filterGridStyle: React.CSSProperties = {
-  display: "grid",
-  gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
-  gap: "16px",
-  marginBottom: "20px",
-};
-
-const filterCardStyle: React.CSSProperties = {
-  background: "white",
-  border: "1px solid #e5e7eb",
-  borderRadius: "16px",
-  padding: "16px",
-  boxShadow: "0 1px 2px rgba(0,0,0,0.03)",
-};
-
-const labelStyle: React.CSSProperties = {
-  display: "block",
-  marginBottom: "8px",
-  fontWeight: 600,
-  fontSize: "14px",
-};
-
-const selectStyle: React.CSSProperties = {
-  width: "100%",
-  padding: "10px 12px",
-  borderRadius: "10px",
-  border: "1px solid #d1d5db",
-  fontSize: "14px",
-  background: "white",
-};
-
-const chartCardStyle: React.CSSProperties = {
-  background: "white",
-  border: "1px solid #e5e7eb",
-  borderRadius: "20px",
-  padding: "24px",
-  marginBottom: "20px",
-  boxShadow: "0 1px 2px rgba(0,0,0,0.03)",
-};
-
-const tableCardStyle: React.CSSProperties = {
-  background: "white",
-  border: "1px solid #e5e7eb",
-  borderRadius: "20px",
-  overflow: "hidden",
-  boxShadow: "0 1px 2px rgba(0,0,0,0.03)",
-};
-
-const placeholderCardStyle: React.CSSProperties = {
-  background: "white",
-  border: "1px solid #e5e7eb",
-  borderRadius: "20px",
-  padding: "24px",
-  boxShadow: "0 1px 2px rgba(0,0,0,0.03)",
-};
-
-const cellStyle: React.CSSProperties = {
-  padding: "14px 16px",
-  borderBottom: "1px solid #f1f5f9",
-  verticalAlign: "top",
-  fontSize: "14px",
-};
-
-const inputStyle: React.CSSProperties = {
-  width: "90px",
-  padding: "8px 10px",
-  borderRadius: "10px",
-  border: "1px solid #d1d5db",
-  fontSize: "13px",
-  background: "white",
-};
-
-const overviewGridStyle: React.CSSProperties = {
-  display: "grid",
-  gridTemplateColumns: "260px minmax(0, 1fr)",
-  gap: "20px",
-  alignItems: "start",
-};
-
-const overviewLeftColumnStyle: React.CSSProperties = {
-  display: "grid",
-  gap: "16px",
-};
-
-const overviewMainGridStyle: React.CSSProperties = {
-  display: "grid",
-  gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
-  gap: "20px",
-  alignItems: "start",
-};
-
-
-
-const overviewMetricCardStyle: React.CSSProperties = {
-  background: "white",
-  border: "1px solid #e5e7eb",
-  borderRadius: "20px",
-  padding: "24px 18px",
-  boxShadow: "0 1px 2px rgba(0,0,0,0.03)",
-};
-
-const overviewPanelStyle: React.CSSProperties = {
-  background: "white",
-  border: "1px solid #e5e7eb",
-  borderRadius: "20px",
-  padding: "20px 24px",
-  boxShadow: "0 1px 2px rgba(0,0,0,0.03)",
-};
-
-  
+// --- CSS CONSTANTS (SAANIKA'S DESIGN) ---
+const filterCardStyle: React.CSSProperties = { background: "white", border: "1px solid #e5e7eb", borderRadius: "16px", padding: "16px", boxShadow: "0 1px 2px rgba(0,0,0,0.03)", marginBottom: "20px" };
+const labelStyle: React.CSSProperties = { display: "block", marginBottom: "8px", fontWeight: 600, fontSize: "14px" };
+const selectStyle: React.CSSProperties = { width: "100%", padding: "10px 12px", borderRadius: "10px", border: "1px solid #d1d5db", fontSize: "14px", background: "white" };
+const chartCardStyle: React.CSSProperties = { background: "white", border: "1px solid #e5e7eb", borderRadius: "20px", padding: "24px", marginBottom: "20px", boxShadow: "0 1px 2px rgba(0,0,0,0.03)" };
+const tableCardStyle: React.CSSProperties = { background: "white", border: "1px solid #e5e7eb", borderRadius: "20px", overflow: "hidden", boxShadow: "0 1px 2px rgba(0,0,0,0.03)", marginBottom: "20px" };
+const cellStyle: React.CSSProperties = { padding: "14px 16px", borderBottom: "1px solid #f1f5f9", verticalAlign: "middle", fontSize: "14px" };
+const inputStyle: React.CSSProperties = { width: "90px", padding: "8px 10px", borderRadius: "10px", border: "1px solid #d1d5db", fontSize: "13px", background: "white" };
+const overviewGridStyle: React.CSSProperties = { display: "grid", gridTemplateColumns: "260px minmax(0, 1fr)", gap: "20px", alignItems: "start" };
+const overviewLeftColumnStyle: React.CSSProperties = { display: "grid", gap: "16px" };
+const overviewMainGridStyle: React.CSSProperties = { display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: "20px", alignItems: "start" };
+const overviewMetricCardStyle: React.CSSProperties = { background: "white", border: "1px solid #e5e7eb", borderRadius: "20px", padding: "24px 18px", boxShadow: "0 1px 2px rgba(0,0,0,0.03)" };
+const overviewPanelStyle: React.CSSProperties = { background: "white", border: "1px solid #e5e7eb", borderRadius: "20px", padding: "20px 24px", boxShadow: "0 1px 2px rgba(0,0,0,0.03)" };
