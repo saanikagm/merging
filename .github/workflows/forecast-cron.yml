@@ -12,6 +12,9 @@ jobs:
     steps:
       - name: Trigger forecast
         run: |
-          curl -fsS -X POST \
+          response=$(curl -sS -w "\nHTTP_STATUS:%{http_code}" -X POST \
             -H "X-API-Key: ${{ secrets.FORECAST_API_KEY }}" \
-            https://merging-production.up.railway.app/run-forecast
+            https://merging-production.up.railway.app/run-forecast)
+          echo "$response"
+          status=$(echo "$response" | grep HTTP_STATUS | cut -d: -f2)
+          if [ "$status" != "200" ]; then exit 1; fi
