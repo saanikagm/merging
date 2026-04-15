@@ -111,6 +111,14 @@ export default function Home() {
   const [latestForecastDate, setLatestForecastDate] = useState<string | null>(null);
   const [showDemandContent, setShowDemandContent] = useState(false);
   const [isGenerating, setIsGenerating] = useState(false);
+  const [generateStartedAt, setGenerateStartedAt] = useState<number | null>(null);
+  const [nowTick, setNowTick] = useState(0);
+
+  useEffect(() => {
+    if (!isGenerating) return;
+    const id = setInterval(() => setNowTick((n) => n + 1), 1000);
+    return () => clearInterval(id);
+  }, [isGenerating]);
 
   const [productFilter, setProductFilter] = useState("");
   const [channelFilter, setChannelFilter] = useState("");
@@ -173,6 +181,7 @@ export default function Home() {
   async function handleGenerateForecast() {
     if (isGenerating) return;
     setIsGenerating(true);
+    setGenerateStartedAt(Date.now());
     setError("");
     try {
       const apiUrl = process.env.NEXT_PUBLIC_FORECAST_API_URL || "http://localhost:8000";
@@ -186,8 +195,7 @@ export default function Home() {
       const jobId: string = startJson.job_id;
       if (!jobId) throw new Error("No job_id returned");
 
-      const deadline = Date.now() + 45 * 60 * 1000;
-      while (Date.now() < deadline) {
+      while (true) {
         await new Promise((r) => setTimeout(r, 10_000));
         const statusRes = await fetch(`${apiUrl}/forecast-status/${jobId}`, {
           headers: { "X-API-Key": apiKey },
@@ -203,12 +211,19 @@ export default function Home() {
           throw new Error(statusJson.error || "Forecast job failed");
         }
       }
-      throw new Error("Forecast timed out after 45 minutes");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to generate forecast.");
     } finally {
       setIsGenerating(false);
+      setGenerateStartedAt(null);
     }
+  }
+
+  function formatElapsed(ms: number): string {
+    const total = Math.floor(ms / 1000);
+    const m = Math.floor(total / 60);
+    const s = total % 60;
+    return `${m}m ${s}s`;
   }
 
   useEffect(() => {
@@ -801,7 +816,9 @@ export default function Home() {
               disabled={isGenerating}
               style={{ background: isGenerating ? "#6b7280" : "#2563eb", color: "white", border: "none", borderRadius: "12px", padding: "12px 18px", fontWeight: 600, cursor: isGenerating ? "wait" : "pointer" }}
             >
-              {isGenerating ? "Generating... (may take a while)" : "Generate New Forecast"}
+              {isGenerating
+                ? `Running on server${generateStartedAt ? ` — ${formatElapsed(Date.now() - generateStartedAt)}` : ""}`
+                : "Generate New Forecast"}
             </button>
             {showDemandContent && (
               <button
@@ -815,6 +832,11 @@ export default function Home() {
               </button>
             )}
           </div>
+          {isGenerating && (
+            <p style={{ marginTop: "16px", marginBottom: 0, color: "#6b7280", fontSize: "13px" }}>
+              Forecast is running on the server (typically 10–30 minutes). You can safely close this tab — when you come back, click <strong>Load Latest Forecast</strong> to see the new results.
+            </p>
+          )}
         </div>
 
         {showDemandContent && (
