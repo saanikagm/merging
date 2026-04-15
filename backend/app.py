@@ -6,6 +6,7 @@ from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 from generate_demand_plan import generate_demand_plan
+from tableau_inventory import fetch_inventory
 
 app = FastAPI()
 
@@ -57,6 +58,16 @@ def run_forecast(x_api_key: str | None = Header(default=None)):
         jobs[job_id] = {"status": "running"}
     threading.Thread(target=_run_job, args=(job_id,), daemon=True).start()
     return {"success": True, "job_id": job_id, "status": "running"}
+
+
+@app.get("/inventory")
+def inventory(x_api_key: str | None = Header(default=None)):
+    _check_auth(x_api_key)
+    try:
+        rows = fetch_inventory()
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Tableau fetch failed: {e}")
+    return {"rows": rows}
 
 
 @app.get("/forecast-status/{job_id}")
