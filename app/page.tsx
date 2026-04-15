@@ -177,15 +177,33 @@ export default function Home() {
     try {
       const apiUrl = process.env.NEXT_PUBLIC_FORECAST_API_URL || "http://localhost:8000";
       const apiKey = process.env.NEXT_PUBLIC_FORECAST_API_KEY || "";
-      const res = await fetch(`${apiUrl}/run-forecast`, {
+      const startRes = await fetch(`${apiUrl}/run-forecast`, {
         method: "POST",
         headers: { "X-API-Key": apiKey },
       });
-      if (!res.ok) throw new Error(`Forecast failed: ${res.status}`);
-      const json = await res.json();
-      if (!json.success) throw new Error("Forecast returned failure");
-      await fetchLatestSession();
-      setShowDemandContent(true);
+      if (!startRes.ok) throw new Error(`Forecast failed to start: ${startRes.status}`);
+      const startJson = await startRes.json();
+      const jobId: string = startJson.job_id;
+      if (!jobId) throw new Error("No job_id returned");
+
+      const deadline = Date.now() + 15 * 60 * 1000;
+      while (Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 10_000));
+        const statusRes = await fetch(`${apiUrl}/forecast-status/${jobId}`, {
+          headers: { "X-API-Key": apiKey },
+        });
+        if (!statusRes.ok) continue;
+        const statusJson = await statusRes.json();
+        if (statusJson.status === "done") {
+          await fetchLatestSession();
+          setShowDemandContent(true);
+          return;
+        }
+        if (statusJson.status === "error") {
+          throw new Error(statusJson.error || "Forecast job failed");
+        }
+      }
+      throw new Error("Forecast timed out after 15 minutes");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to generate forecast.");
     } finally {

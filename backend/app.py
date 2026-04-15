@@ -1,4 +1,6 @@
 import os
+import threading
+import uuid
 
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -23,6 +25,24 @@ app.add_middleware(
 
 API_KEY = os.environ.get("FORECAST_API_KEY")
 
+jobs: dict[str, dict] = {}
+jobs_lock = threading.Lock()
+
+
+def _run_job(job_id: str):
+    try:
+        session_id = generate_demand_plan()
+        with jobs_lock:
+            jobs[job_id] = {"status": "done", "session_id": session_id}
+    except Exception as e:
+        with jobs_lock:
+            jobs[job_id] = {"status": "error", "error": str(e)}
+
+
+def _check_auth(x_api_key: str | None):
+    if not API_KEY or x_api_key != API_KEY:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
 
 @app.get("/health")
 def health():
@@ -31,7 +51,19 @@ def health():
 
 @app.post("/run-forecast")
 def run_forecast(x_api_key: str | None = Header(default=None)):
-    if not API_KEY or x_api_key != API_KEY:
-        raise HTTPException(status_code=401, detail="Unauthorized")
-    session_id = generate_demand_plan()
-    return {"success": True, "session_id": session_id}
+    _check_auth(x_api_key)
+    job_id = str(uuid.uuid4())
+    with jobs_lock:
+        jobs[job_id] = {"status": "running"}
+    threading.Thread(target=_run_job, args=(job_id,), daemon=True).start()
+    return {"success": True, "job_id": job_id, "status": "running"}
+
+
+@app.get("/forecast-status/{job_id}")
+def forecast_status(job_id: str, x_api_key: str | None = Header(default=None)):
+    _check_auth(x_api_key)
+    with jobs_lock:
+        job = jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return job
