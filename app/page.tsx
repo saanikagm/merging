@@ -465,6 +465,27 @@ export default function Home() {
     return { data, hasOverrides };
   }, [rows, historicalRows, demandViewLevel, chartBrand, chartChannel, chartPackaging, unitMode]);
 
+  const yearlyComparisonChart = useMemo(() => {
+    const byYearWeek: Record<number, Record<number, number>> = {};
+    historicalRows.forEach((r) => {
+      const d = new Date(r.Date);
+      if (Number.isNaN(d.getTime())) return;
+      const year = d.getUTCFullYear();
+      const start = Date.UTC(year, 0, 1);
+      const week = Math.min(52, Math.floor((d.getTime() - start) / (7 * 24 * 3600 * 1000)) + 1);
+      byYearWeek[year] ||= {};
+      byYearWeek[year][week] = (byYearWeek[year][week] || 0) + (Number(r["Sales Vol"]) || 0);
+    });
+    const years = Object.keys(byYearWeek).map(Number).sort((a, b) => a - b);
+    const data = Array.from({ length: 52 }, (_, i) => {
+      const week = i + 1;
+      const row: Record<string, number | string> = { week };
+      years.forEach((y) => { row[String(y)] = byYearWeek[y][week] || 0; });
+      return row;
+    });
+    return { data, years };
+  }, [historicalRows]);
+
   const pivotRows = useMemo(() => {
     const grouped: Record<string, PivotRow> = {};
     const scopedRows = filteredRows.filter((r) =>
@@ -655,10 +676,31 @@ export default function Home() {
           </div>
           <div style={overviewMainGridStyle}>
             <div style={overviewPanelStyle}>
-              <h3 style={{ margin: 0, fontSize: "18px", fontWeight: 700 }}>Weekly Forecast Demand</h3>
+              <h3 style={{ margin: 0, fontSize: "18px", fontWeight: 700 }}>Yearly Demand Comparison</h3>
+              <p style={{ margin: 0, marginTop: "4px", color: "#6b7280", fontSize: "13px" }}>Weekly sales volume (BBL) by year. Compare current year vs prior years at a glance.</p>
               <div style={{ width: "100%", height: 300, marginTop: "12px" }}>
                 <ResponsiveContainer width="100%" height="100%">
-                  <LineChart data={chartData}><CartesianGrid strokeDasharray="3 3" vertical={false} /><XAxis dataKey="week" /><YAxis /><Tooltip /><Legend /><Line type="monotone" dataKey="forecast" stroke="#94a3b8" strokeWidth={3} dot={{ r: 3 }} /><Line type="monotone" dataKey="effective" stroke="#2563eb" strokeWidth={3} dot={{ r: 4 }} /></LineChart>
+                  <LineChart data={yearlyComparisonChart.data}>
+                    <CartesianGrid strokeDasharray="3 3" vertical={false} />
+                    <XAxis dataKey="week" label={{ value: "Week of Year", position: "insideBottom", offset: -4, fill: "#6b7280", fontSize: 12 }} />
+                    <YAxis />
+                    <Tooltip />
+                    <Legend />
+                    {yearlyComparisonChart.years.map((y, i) => {
+                      const palette = ["#cbd5e1", "#94a3b8", "#64748b", "#2563eb"];
+                      const isLatest = i === yearlyComparisonChart.years.length - 1;
+                      return (
+                        <Line
+                          key={y}
+                          type="monotone"
+                          dataKey={String(y)}
+                          stroke={isLatest ? "#2563eb" : palette[Math.max(0, palette.length - 2 - (yearlyComparisonChart.years.length - 1 - i))]}
+                          strokeWidth={isLatest ? 3 : 2}
+                          dot={false}
+                        />
+                      );
+                    })}
+                  </LineChart>
                 </ResponsiveContainer>
               </div>
             </div>
