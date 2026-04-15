@@ -467,6 +467,7 @@ export default function Home() {
 
   const yearlyComparisonChart = useMemo(() => {
     const byYearWeek: Record<number, Record<number, number>> = {};
+    const lastWeekByYear: Record<number, number> = {};
     historicalRows.forEach((r) => {
       const d = new Date(r.Date);
       if (Number.isNaN(d.getTime())) return;
@@ -475,12 +476,15 @@ export default function Home() {
       const week = Math.min(52, Math.floor((d.getTime() - start) / (7 * 24 * 3600 * 1000)) + 1);
       byYearWeek[year] ||= {};
       byYearWeek[year][week] = (byYearWeek[year][week] || 0) + (Number(r["Sales Vol"]) || 0);
+      lastWeekByYear[year] = Math.max(lastWeekByYear[year] || 0, week);
     });
     const years = Object.keys(byYearWeek).map(Number).sort((a, b) => a - b);
     const data = Array.from({ length: 52 }, (_, i) => {
       const week = i + 1;
-      const row: Record<string, number | string> = { week };
-      years.forEach((y) => { row[String(y)] = byYearWeek[y][week] || 0; });
+      const row: Record<string, number | string | null> = { week };
+      years.forEach((y) => {
+        row[String(y)] = week > lastWeekByYear[y] ? null : (byYearWeek[y][week] || 0);
+      });
       return row;
     });
     return { data, years };
@@ -687,16 +691,20 @@ export default function Home() {
                     <Tooltip />
                     <Legend />
                     {yearlyComparisonChart.years.map((y, i) => {
-                      const palette = ["#cbd5e1", "#94a3b8", "#64748b", "#2563eb"];
                       const isLatest = i === yearlyComparisonChart.years.length - 1;
+                      const priorPalette = ["#f59e0b", "#10b981", "#a855f7", "#ef4444", "#0ea5e9"];
+                      const priorIndex = yearlyComparisonChart.years.length - 2 - i;
+                      const stroke = isLatest ? "#2563eb" : priorPalette[priorIndex % priorPalette.length];
                       return (
                         <Line
                           key={y}
                           type="monotone"
                           dataKey={String(y)}
-                          stroke={isLatest ? "#2563eb" : palette[Math.max(0, palette.length - 2 - (yearlyComparisonChart.years.length - 1 - i))]}
+                          stroke={stroke}
+                          strokeOpacity={isLatest ? 1 : 0.35}
                           strokeWidth={isLatest ? 3 : 2}
                           dot={false}
+                          connectNulls={false}
                         />
                       );
                     })}
