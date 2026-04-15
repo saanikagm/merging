@@ -46,7 +46,7 @@ type PendingAudit = {
   inventoryField?: "startInv" | "finalSS";
 };
 
-const TABS = ["Overview", "Demand Plan", "Inventory", "Brewing Plan", "Packaging Plan", "Allocation Plan"] as const;
+const TABS = ["Overview", "Forecasted Demand", "Inventory", "Brewing Plan", "Packaging Plan - Coming Soon", "Allocation Plan - Coming Soon"] as const;
 type TabName = (typeof TABS)[number];
 
 // --- HELPER MATH ---
@@ -100,7 +100,7 @@ function formatWeekLabel(date: Date) { return date.toLocaleDateString("en-US", {
 
 // --- MAIN COMPONENT ---
 export default function Home() {
-  const [activeTab, setActiveTab] = useState<TabName>("Demand Plan");
+  const [activeTab, setActiveTab] = useState<TabName>("Forecasted Demand");
   const [rows, setRows] = useState<DemandPlanRow[]>([]);
   const [historicalRows, setHistoricalRows] = useState<HistoricalRow[]>([]);
   const [inventoryDB, setInventoryDB] = useState<InventoryRow[]>([]);
@@ -1029,10 +1029,10 @@ export default function Home() {
         {!loading && !error && (
           <>
             {activeTab === "Overview" && renderOverviewTab()}
-            {activeTab === "Demand Plan" && renderDemandPlanTab()}
+            {activeTab === "Forecasted Demand" && renderDemandPlanTab()}
             {activeTab === "Inventory" && renderInventoryTab()}
             {activeTab === "Brewing Plan" && renderBrewingTab()}
-            {(activeTab === "Packaging Plan" || activeTab === "Allocation Plan") && <div style={chartCardStyle}><h2>{activeTab}</h2><p>Coming Soon</p></div>}
+            {(activeTab === "Packaging Plan - Coming Soon" || activeTab === "Allocation Plan - Coming Soon") && <div style={chartCardStyle}><h2>{activeTab}</h2><p>Coming Soon</p></div>}
           </>
         )}
       </div>
