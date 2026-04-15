@@ -176,7 +176,11 @@ export default function Home() {
     setError("");
     try {
       const apiUrl = process.env.NEXT_PUBLIC_FORECAST_API_URL || "http://localhost:8000";
-      const res = await fetch(`${apiUrl}/run-forecast`, { method: "POST" });
+      const apiKey = process.env.NEXT_PUBLIC_FORECAST_API_KEY || "";
+      const res = await fetch(`${apiUrl}/run-forecast`, {
+        method: "POST",
+        headers: { "X-API-Key": apiKey },
+      });
       if (!res.ok) throw new Error(`Forecast failed: ${res.status}`);
       const json = await res.json();
       if (!json.success) throw new Error("Forecast returned failure");
