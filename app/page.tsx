@@ -203,7 +203,7 @@ export default function Home() {
           throw new Error(statusJson.error || "Forecast job failed");
         }
       }
-      throw new Error("Forecast timed out after 15 minutes");
+      throw new Error("Forecast timed out after 45 minutes");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to generate forecast.");
     } finally {
