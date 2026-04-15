@@ -100,7 +100,7 @@ function formatWeekLabel(date: Date) { return date.toLocaleDateString("en-US", {
 
 // --- MAIN COMPONENT ---
 export default function Home() {
-  const [activeTab, setActiveTab] = useState<TabName>("Forecasted Demand");
+  const [activeTab, setActiveTab] = useState<TabName>("Overview");
   const [rows, setRows] = useState<DemandPlanRow[]>([]);
   const [historicalRows, setHistoricalRows] = useState<HistoricalRow[]>([]);
   const [inventoryDB, setInventoryDB] = useState<InventoryRow[]>([]);
@@ -638,7 +638,19 @@ export default function Home() {
         </div>
         <div style={overviewGridStyle}>
           <div style={overviewLeftColumnStyle}>
-            {renderMetricCard("Demand Plan", [`${formatNumber(chartData.reduce((s, r) => s + r.effective, 0))} Total BBL`, `Avg BBL Weekly`], [2, 3])}
+            {(() => {
+              const totalBbl = chartData.reduce((s, r) => s + r.effective, 0);
+              const weeks = chartData.length || 1;
+              const avgWeekly = totalBbl / weeks;
+              const peakWeek = chartData.reduce((max, r) => r.effective > max ? r.effective : max, 0);
+              const brandCount = new Set(rows.map((r) => r.brand)).size;
+              return renderMetricCard("Demand Plan", [
+                `${formatNumber(totalBbl)} BBL forecast (next ${weeks} wks)`,
+                `${formatNumber(avgWeekly)} BBL avg/week`,
+                `${formatNumber(peakWeek)} BBL peak week`,
+                `${brandCount} brands`,
+              ]);
+            })()}
             {renderMetricCard("Inventory Plan", ["4.4 WOH Avg", "-0.2 - 10.0 WOH Range", "6% Weeks Above Target"])}
           </div>
           <div style={overviewMainGridStyle}>
