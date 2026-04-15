@@ -186,7 +186,7 @@ export default function Home() {
       const jobId: string = startJson.job_id;
       if (!jobId) throw new Error("No job_id returned");
 
-      const deadline = Date.now() + 15 * 60 * 1000;
+      const deadline = Date.now() + 45 * 60 * 1000;
       while (Date.now() < deadline) {
         await new Promise((r) => setTimeout(r, 10_000));
         const statusRes = await fetch(`${apiUrl}/forecast-status/${jobId}`, {
