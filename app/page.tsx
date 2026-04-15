@@ -313,21 +313,31 @@ export default function Home() {
       }
       setHistoricalRows(fetchedHist);
 
-      const { data: invData, error: invErr } = await supabase.from("inventory").select("*");
-      if (invErr) { console.error("Inventory fetch error:", invErr.message); }
+      const apiUrl = process.env.NEXT_PUBLIC_FORECAST_API_URL || "http://localhost:8000";
+      const apiKey = process.env.NEXT_PUBLIC_FORECAST_API_KEY || "";
+      const totalsByProduct: Record<string, number> = {};
+      try {
+        const invRes = await fetch(`${apiUrl}/inventory`, { headers: { "X-API-Key": apiKey } });
+        if (!invRes.ok) throw new Error(`Inventory fetch failed: ${invRes.status}`);
+        const invJson = await invRes.json();
+        const tableauRows: Array<Record<string, string>> = invJson.rows || [];
+        tableauRows.forEach((r) => {
+          const name = r.ProductName || "Unknown";
+          const vol = Number(r["Inventory Volume"] || 0);
+          if (!Number.isFinite(vol)) return;
+          totalsByProduct[name] = (totalsByProduct[name] || 0) + vol;
+        });
+      } catch (e) {
+        console.error("Tableau inventory fetch error:", e);
+      }
 
-      const rawInv = invData || [];
-      const initialInv = rawInv.map((item: any) => {
-          const start = Number(item.startInv ?? item.starting_inventory ?? item.inventory_bbl ?? item.inventory ?? 0);
-          const ss = Number(item.safetyStock ?? item.safety_stock ?? item.baseSafetyStock ?? 10);
-          return {
-              name: item.name || item.ProductName || item.brand || "Unknown",
-              startInv: start,
-              originalStartInv: start, // Baseline for visual highlight comparison
-              baseSafetyStock: ss,
-              finalSS: ss
-          };
-      });
+      const initialInv = Object.entries(totalsByProduct).map(([name, total]) => ({
+        name,
+        startInv: Number(total.toFixed(2)),
+        originalStartInv: Number(total.toFixed(2)),
+        baseSafetyStock: 10,
+        finalSS: 10,
+      }));
 
       const uniqueDemandBrands = [...new Set(fetchedDemand.map(r => r.brand))];
       uniqueDemandBrands.forEach(brand => {
