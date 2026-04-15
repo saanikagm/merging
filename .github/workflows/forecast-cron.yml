@@ -1,0 +1,17 @@
+name: Weekly Forecast
+
+on:
+  schedule:
+    # Mondays at 04:00 UTC = Sunday 8pm PST / 9pm PDT
+    - cron: "0 4 * * 1"
+  workflow_dispatch: {}
+
+jobs:
+  run-forecast:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger forecast
+        run: |
+          curl -fsS -X POST \
+            -H "X-API-Key: ${{ secrets.FORECAST_API_KEY }}" \
+            https://merging-production.up.railway.app/run-forecast
