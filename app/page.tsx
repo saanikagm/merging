@@ -270,7 +270,7 @@ export default function Home() {
   const weekLabels = useMemo(() => Array.from({ length: 8 }, (_, i) => { const d = new Date(getNextMonday()); d.setDate(d.getDate() + i * 7); return formatWeekLabel(d); }), []);
 
   const chartData = useMemo(() => {
-    const map: any = {};
+    const map: Record<number, { week: string; forecast: number; effective: number }> = {};
     for (let w = 1; w <= 8; w++) map[w] = { week: weekLabels[w - 1], forecast: 0, effective: 0 };
     filteredRows.forEach((r) => {
       if (r.week_number >= 1 && r.week_number <= 8) {
