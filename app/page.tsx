@@ -153,6 +153,23 @@ export default function Home() {
     setShowLockDemandModal(false);
   }
 
+  function resetPlanWorkflow() {
+    persistPlanWorkflow(emptyPlanWorkflow);
+  }
+
+  const hasAnyLock = !!(planWorkflow.demandLockedAt || planWorkflow.inventoryLockedAt || planWorkflow.brewingLockedAt);
+  const [showResetModal, setShowResetModal] = useState(false);
+  const [pendingResetAction, setPendingResetAction] = useState<null | (() => void)>(null);
+
+  function requestResetThen(action: () => void) {
+    if (hasAnyLock) {
+      setPendingResetAction(() => action);
+      setShowResetModal(true);
+    } else {
+      action();
+    }
+  }
+
   function formatLockedAt(iso: string): string {
     return new Date(iso).toLocaleString("en-US", { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" });
   }
@@ -839,11 +856,11 @@ export default function Home() {
             <p style={{ marginTop: "8px", marginBottom: 0, color: "#6b7280" }}>Current session: {sessionId}</p>
           </div>
           <div style={{ display: "flex", gap: "12px", marginTop: "20px", flexWrap: "wrap" }}>
-            <button onClick={() => setShowDemandContent(true)} style={{ background: "#111827", color: "white", border: "none", borderRadius: "12px", padding: "12px 18px", fontWeight: 600, cursor: "pointer" }}>
+            <button onClick={() => requestResetThen(() => { resetPlanWorkflow(); setShowDemandContent(true); })} style={{ background: "#111827", color: "white", border: "none", borderRadius: "12px", padding: "12px 18px", fontWeight: 600, cursor: "pointer" }}>
               Load Latest Forecast{latestForecastDate ? ` (${latestForecastDate})` : ""}
             </button>
             <button
-              onClick={handleGenerateForecast}
+              onClick={() => requestResetThen(() => { resetPlanWorkflow(); handleGenerateForecast(); })}
               disabled={isGenerating}
               style={{ background: isGenerating ? "#6b7280" : "#2563eb", color: "white", border: "none", borderRadius: "12px", padding: "12px 18px", fontWeight: 600, cursor: isGenerating ? "wait" : "pointer" }}
             >
@@ -1057,6 +1074,31 @@ export default function Home() {
                   />
                 </LineChart>
               </ResponsiveContainer>
+            </div>
+          </div>
+        )}
+
+        {showResetModal && (
+          <div style={{ position: "fixed", inset: 0, background: "rgba(17, 24, 39, 0.5)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000 }}>
+            <div style={{ background: "white", borderRadius: "16px", padding: "28px", maxWidth: "440px", width: "92%", boxShadow: "0 20px 60px rgba(0,0,0,0.25)" }}>
+              <h3 style={{ margin: 0, marginBottom: "12px", fontSize: "20px", fontWeight: 700 }}>Start a New Plan?</h3>
+              <p style={{ margin: 0, marginBottom: "24px", color: "#4b5563", lineHeight: 1.5 }}>
+                You have a plan in progress. Starting a new plan will clear all locked stages and reset your workflow. Are you sure you want to continue?
+              </p>
+              <div style={{ display: "flex", gap: "12px", justifyContent: "flex-end" }}>
+                <button
+                  onClick={() => { setShowResetModal(false); setPendingResetAction(null); }}
+                  style={{ background: "white", color: "#111827", border: "1px solid #d1d5db", borderRadius: "10px", padding: "10px 16px", fontWeight: 600, cursor: "pointer" }}
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={() => { const a = pendingResetAction; setShowResetModal(false); setPendingResetAction(null); if (a) a(); }}
+                  style={{ background: "#b91c1c", color: "white", border: "none", borderRadius: "10px", padding: "10px 16px", fontWeight: 600, cursor: "pointer" }}
+                >
+                  Start New Plan
+                </button>
+              </div>
             </div>
           </div>
         )}
