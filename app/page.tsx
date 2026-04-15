@@ -473,7 +473,7 @@ export default function Home() {
               return { ...prev, [brand]: plan };
           });
       } else {
-          setPendingEdit({ context: 'brewing', brand, weekIndex, newValue: value });
+          setPendingEdit({ context: 'brewing', brand, weekNumber: weekIndex, newValue: value });
       }
   };
 
