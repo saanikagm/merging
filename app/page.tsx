@@ -148,6 +148,39 @@ export default function Home() {
     try { localStorage.setItem(PLAN_WORKFLOW_KEY, JSON.stringify(next)); } catch {}
   }
 
+  const [refreshingInventory, setRefreshingInventory] = useState(false);
+
+  async function refreshInventoryFromTableau() {
+    if (refreshingInventory) return;
+    setRefreshingInventory(true);
+    try {
+      const apiUrl = process.env.NEXT_PUBLIC_FORECAST_API_URL || "http://localhost:8000";
+      const apiKey = process.env.NEXT_PUBLIC_FORECAST_API_KEY || "";
+      const invRes = await fetch(`${apiUrl}/inventory`, { headers: { "X-API-Key": apiKey } });
+      if (!invRes.ok) throw new Error(`Inventory fetch failed: ${invRes.status}`);
+      const invJson = await invRes.json();
+      const tableauRows: Array<Record<string, string>> = invJson.rows || [];
+      const totalsByProduct: Record<string, number> = {};
+      tableauRows.forEach((r) => {
+        const name = r.ProductName || "Unknown";
+        const vol = Number(r["Inventory Volume"] || 0);
+        if (!Number.isFinite(vol)) return;
+        totalsByProduct[name] = (totalsByProduct[name] || 0) + vol;
+      });
+      setInventoryDB((prev) => prev.map((item) => {
+        const fresh = totalsByProduct[item.name];
+        if (fresh === undefined) return item;
+        const rounded = Number(fresh.toFixed(2));
+        return { ...item, startInv: rounded, originalStartInv: rounded };
+      }));
+    } catch (e) {
+      console.error("Inventory refresh failed:", e);
+      alert("Failed to refresh inventory from Tableau. See console for details.");
+    } finally {
+      setRefreshingInventory(false);
+    }
+  }
+
   function lockDemandPlan() {
     persistPlanWorkflow({ ...planWorkflow, demandLockedAt: new Date().toISOString() });
     setShowLockDemandModal(false);
@@ -737,8 +770,19 @@ export default function Home() {
     return (
       <div style={{ display: "flex", flexDirection: "column", gap: "20px" }}>
         <div style={chartCardStyle}>
-            <h2 style={{ margin: 0, fontSize: "28px", fontWeight: 700 }}>Inventory Parameters</h2>
-            <p style={{ marginTop: "8px", marginBottom: 0, color: "#6b7280" }}>Adjust global service levels or override specific safety stock buffers.</p>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: "16px", flexWrap: "wrap" }}>
+              <div>
+                <h2 style={{ margin: 0, fontSize: "28px", fontWeight: 700 }}>Inventory Parameters</h2>
+                <p style={{ marginTop: "8px", marginBottom: 0, color: "#6b7280" }}>Adjust global service levels or override specific safety stock buffers.</p>
+              </div>
+              <button
+                onClick={refreshInventoryFromTableau}
+                disabled={refreshingInventory}
+                style={{ background: refreshingInventory ? "#6b7280" : "#111827", color: "white", border: "none", borderRadius: "12px", padding: "12px 18px", fontWeight: 600, cursor: refreshingInventory ? "wait" : "pointer" }}
+              >
+                {refreshingInventory ? "Refreshing..." : "Refresh Inventory from Tableau"}
+              </button>
+            </div>
         </div>
 
         <div style={{...filterCardStyle, display: 'flex', justifyContent: 'space-between', alignItems: 'center'}}>
