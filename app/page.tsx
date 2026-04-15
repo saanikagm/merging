@@ -126,6 +126,37 @@ export default function Home() {
   const [demandViewLevel, setDemandViewLevel] = useState<"packaging" | "product">("product");
   const [unitMode, setUnitMode] = useState<"BBL" | "CE">("BBL");
 
+  type PlanWorkflow = {
+    demandLockedAt: string | null;
+    inventoryLockedAt: string | null;
+    brewingLockedAt: string | null;
+  };
+  const PLAN_WORKFLOW_KEY = "planWorkflow";
+  const emptyPlanWorkflow: PlanWorkflow = { demandLockedAt: null, inventoryLockedAt: null, brewingLockedAt: null };
+  const [planWorkflow, setPlanWorkflow] = useState<PlanWorkflow>(emptyPlanWorkflow);
+  const [showLockDemandModal, setShowLockDemandModal] = useState(false);
+
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(PLAN_WORKFLOW_KEY);
+      if (raw) setPlanWorkflow(JSON.parse(raw));
+    } catch {}
+  }, []);
+
+  function persistPlanWorkflow(next: PlanWorkflow) {
+    setPlanWorkflow(next);
+    try { localStorage.setItem(PLAN_WORKFLOW_KEY, JSON.stringify(next)); } catch {}
+  }
+
+  function lockDemandPlan() {
+    persistPlanWorkflow({ ...planWorkflow, demandLockedAt: new Date().toISOString() });
+    setShowLockDemandModal(false);
+  }
+
+  function formatLockedAt(iso: string): string {
+    return new Date(iso).toLocaleString("en-US", { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" });
+  }
+
   // Demand Plan chart filters (independent from table filters)
   const [chartBrand, setChartBrand] = useState("");
   const [chartChannel, setChartChannel] = useState("");
@@ -831,6 +862,19 @@ export default function Home() {
                 Visualize Forecast ↓
               </button>
             )}
+            {showDemandContent && !planWorkflow.demandLockedAt && (
+              <button
+                onClick={() => setShowLockDemandModal(true)}
+                style={{ background: "#047857", color: "white", border: "none", borderRadius: "12px", padding: "12px 18px", fontWeight: 600, cursor: "pointer" }}
+              >
+                Lock Demand Plan
+              </button>
+            )}
+            {planWorkflow.demandLockedAt && (
+              <div style={{ display: "inline-flex", alignItems: "center", gap: "8px", background: "#ecfdf5", color: "#065f46", border: "1px solid #a7f3d0", borderRadius: "12px", padding: "12px 18px", fontWeight: 600 }}>
+                Demand Plan Locked — {formatLockedAt(planWorkflow.demandLockedAt)}
+              </div>
+            )}
           </div>
           {isGenerating && (
             <p style={{ marginTop: "16px", marginBottom: 0, color: "#6b7280", fontSize: "13px" }}>
@@ -1013,6 +1057,31 @@ export default function Home() {
                   />
                 </LineChart>
               </ResponsiveContainer>
+            </div>
+          </div>
+        )}
+
+        {showLockDemandModal && (
+          <div style={{ position: "fixed", inset: 0, background: "rgba(17, 24, 39, 0.5)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000 }}>
+            <div style={{ background: "white", borderRadius: "16px", padding: "28px", maxWidth: "440px", width: "92%", boxShadow: "0 20px 60px rgba(0,0,0,0.25)" }}>
+              <h3 style={{ margin: 0, marginBottom: "12px", fontSize: "20px", fontWeight: 700 }}>Lock Demand Plan</h3>
+              <p style={{ margin: 0, marginBottom: "24px", color: "#4b5563", lineHeight: 1.5 }}>
+                Once locked, the demand values for this plan cannot be edited. The locked values will flow into the Inventory and Brewing tabs as the basis for the rest of your plan. Are you sure you want to continue?
+              </p>
+              <div style={{ display: "flex", gap: "12px", justifyContent: "flex-end" }}>
+                <button
+                  onClick={() => setShowLockDemandModal(false)}
+                  style={{ background: "white", color: "#111827", border: "1px solid #d1d5db", borderRadius: "10px", padding: "10px 16px", fontWeight: 600, cursor: "pointer" }}
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={lockDemandPlan}
+                  style={{ background: "#047857", color: "white", border: "none", borderRadius: "10px", padding: "10px 16px", fontWeight: 600, cursor: "pointer" }}
+                >
+                  Lock Demand Plan
+                </button>
+              </div>
             </div>
           </div>
         )}
