@@ -184,6 +184,7 @@ export default function Home() {
   function lockDemandPlan() {
     persistPlanWorkflow({ ...planWorkflow, demandLockedAt: new Date().toISOString() });
     setShowLockDemandModal(false);
+    setActiveTab("Inventory");
   }
 
   function resetPlanWorkflow() {
@@ -707,6 +708,9 @@ export default function Home() {
         <div style={chartCardStyle}>
           <h2 style={{ margin: 0, fontSize: "28px", fontWeight: 700 }}>Overview</h2>
           <p style={{ marginTop: "8px", marginBottom: 0, color: "#6b7280" }}>Snapshot of the current demand forecast and effective demand plan.</p>
+          <p style={{ marginTop: "12px", marginBottom: 0, color: "#9ca3af", fontSize: "12px" }}>
+            Forecast last generated: {latestForecastDate || "—"} · Inventory last refreshed: pulled live from Tableau on page load
+          </p>
         </div>
         <div style={overviewGridStyle}>
           <div style={overviewLeftColumnStyle}>
