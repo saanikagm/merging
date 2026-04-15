@@ -479,6 +479,10 @@ export default function Home() {
       lastWeekByYear[year] = Math.max(lastWeekByYear[year] || 0, week);
     });
     const years = Object.keys(byYearWeek).map(Number).sort((a, b) => a - b);
+    if (years.length > 0) {
+      const latest = years[years.length - 1];
+      lastWeekByYear[latest] = Math.max(0, (lastWeekByYear[latest] || 0) - 1);
+    }
     const data = Array.from({ length: 52 }, (_, i) => {
       const week = i + 1;
       const row: Record<string, number | string | null> = { week };
