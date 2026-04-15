@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "@/lib/supabase";
 import { generateCapacityPlan } from './capacityPlanning';
 import {
@@ -12,6 +12,11 @@ type DemandPlanRow = {
   id: string; brand: string; channel: string; packaging_format: string;
   week_number: number; year: number; previous_value: number | null;
   effective_value: number | null; session_id: string;
+};
+
+type HistoricalRow = {
+  Date: string; ProductName: string; Channel: string;
+  PackagingTypeName: string; "Sales Vol": number;
 };
 
 type PivotRow = {
@@ -49,6 +54,40 @@ function getEffectiveOrForecast(row: DemandPlanRow) { return row.effective_value
 function formatNumber(value: number | null | undefined) { return value == null ? "" : Number(value).toFixed(2).replace(/\.00$/, ""); }
 function getZRatio(sl: number) { return sl === 99 ? 2.33 / 1.645 : sl === 90 ? 1.28 / 1.645 : sl === 85 ? 1.04 / 1.645 : 1.0; }
 
+// --- UNIT CONVERSION (BBL → CE) ---
+// Ratios derived from CE-per-unit / BBL-per-unit in the brewery's reference table.
+// For packaging types not in the map (or "ALL" rows), fall back to the industry
+// standard 1 BBL = 13.78 CE.
+const CE_PER_BBL_DEFAULT = 13.78;
+const CE_PER_BBL: Record<string, number> = {
+  "Keg - 50L": 5.87 / 0.426,
+  "Keg - 20L - Petainer": 2.32 / 0.168,
+  "Keg - GCT - One Way": 2.30 / 0.167,
+  "Keg - Sixtel": 2.30 / 0.167,
+  "Keg - GCT Sixtel": 2.30 / 0.167,
+  "Case - 6x4 - 16oz - Can": 1.34 / 0.097,
+  "Case - 24x - 12oz - Can": 1.00 / 0.073,
+  "Case - 6x4 - 12oz - Can": 1.00 / 0.073,
+  "Case - 4x6 - 12oz - Can": 1.00 / 0.073,
+  "Single - 12oz - Can": 1.00 / 0.073,
+  "Case - 12x - 19.2oz - Can": 0.80 / 0.058,
+  "Case - 12x - 16oz - Can": 0.66 / 0.048,
+  "Keg - 1/2 bbl": 6.89 / 0.500,
+  "Keg - 1/4 bbl": 3.45 / 0.250,
+  "Keg - 1/6 bbl": 2.30 / 0.167,
+  "Keg - 1/2 BBL KLPPF": 6.89 / 0.500,
+  "Keg - 1/6 BBL KLPPF": 2.30 / 0.167,
+  "Case - 2x12 - 12oz - Can": 1.00 / 0.073,
+  "Case - 12x - 500ml - Bottle": 0.70 / 0.051,
+  "Case - 24x - 16oz - Can": 1.34 / 0.097,
+  "Single - Magnum 1.5 L": 0.18 / 0.013,
+};
+function convertBblTo(value: number, packaging: string, unit: "BBL" | "CE"): number {
+  if (unit === "BBL") return value;
+  const ratio = CE_PER_BBL[packaging] ?? CE_PER_BBL_DEFAULT;
+  return value * ratio;
+}
+
 function getNextMonday(fromDate = new Date()) {
   const date = new Date(fromDate);
   const day = date.getDay();
@@ -63,6 +102,7 @@ function formatWeekLabel(date: Date) { return date.toLocaleDateString("en-US", {
 export default function Home() {
   const [activeTab, setActiveTab] = useState<TabName>("Demand Plan");
   const [rows, setRows] = useState<DemandPlanRow[]>([]);
+  const [historicalRows, setHistoricalRows] = useState<HistoricalRow[]>([]);
   const [inventoryDB, setInventoryDB] = useState<InventoryRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -75,7 +115,14 @@ export default function Home() {
   const [productFilter, setProductFilter] = useState("");
   const [channelFilter, setChannelFilter] = useState("");
   const [packagingFilter, setPackagingFilter] = useState("");
-  const [demandViewLevel, setDemandViewLevel] = useState<"packaging" | "product">("packaging");
+  const [demandViewLevel, setDemandViewLevel] = useState<"packaging" | "product">("product");
+  const [unitMode, setUnitMode] = useState<"BBL" | "CE">("BBL");
+
+  // Demand Plan chart filters (independent from table filters)
+  const [chartBrand, setChartBrand] = useState("");
+  const [chartChannel, setChartChannel] = useState("");
+  const [chartPackaging, setChartPackaging] = useState("");
+  const demandChartRef = useRef<HTMLDivElement>(null);
 
   // Operations States
   const [globalServiceLevel, setGlobalServiceLevel] = useState(95);
@@ -88,7 +135,6 @@ export default function Home() {
   const [cancelTick, setCancelTick] = useState(0);
 
   // --- DATA FETCHING ---
-  useEffect(() => {
   async function fetchLatestSession() {
     try {
       const { data, error } = await supabase
@@ -124,18 +170,63 @@ export default function Home() {
     }
   }
 
-  fetchLatestSession();
-}, []);
+  async function handleGenerateForecast() {
+    if (isGenerating) return;
+    setIsGenerating(true);
+    setError("");
+    try {
+      const apiUrl = process.env.NEXT_PUBLIC_FORECAST_API_URL || "http://localhost:8000";
+      const res = await fetch(`${apiUrl}/run-forecast`, { method: "POST" });
+      if (!res.ok) throw new Error(`Forecast failed: ${res.status}`);
+      const json = await res.json();
+      if (!json.success) throw new Error("Forecast returned failure");
+      await fetchLatestSession();
+      setShowDemandContent(true);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to generate forecast.");
+    } finally {
+      setIsGenerating(false);
+    }
+  }
+
+  useEffect(() => {
+    fetchLatestSession();
+  }, []);
 
   useEffect(() => {
     if (!sessionId) return;
     async function loadData() {
       setLoading(true);
 
-      const { data: demandData, error: demandErr } = await supabase.from("demand_plans").select("*").eq("session_id", sessionId);
-      if (demandErr) { setError(demandErr.message); setLoading(false); return; }
-      const fetchedDemand = (demandData || []) as DemandPlanRow[];
+      const fetchedDemand: DemandPlanRow[] = [];
+      const pageSize = 1000;
+      for (let from = 0; ; from += pageSize) {
+        const { data, error: demandErr } = await supabase
+          .from("demand_plans")
+          .select("*")
+          .eq("session_id", sessionId)
+          .range(from, from + pageSize - 1);
+        if (demandErr) { setError(demandErr.message); setLoading(false); return; }
+        const batch = (data || []) as DemandPlanRow[];
+        fetchedDemand.push(...batch);
+        if (batch.length < pageSize) break;
+      }
       setRows(fetchedDemand);
+
+      // Fetch all historical demand for the chart (filter client-side because
+      // the Date column may be stored as text in M/D/YYYY format).
+      const fetchedHist: HistoricalRow[] = [];
+      for (let from = 0; ; from += pageSize) {
+        const { data: histData, error: histErr } = await supabase
+          .from("societehistoricaldemand")
+          .select("*")
+          .range(from, from + pageSize - 1);
+        if (histErr) { console.error("Historical fetch error:", histErr.message); break; }
+        const batch = (histData || []) as HistoricalRow[];
+        fetchedHist.push(...batch);
+        if (batch.length < pageSize) break;
+      }
+      setHistoricalRows(fetchedHist);
 
       const { data: invData, error: invErr } = await supabase.from("inventory").select("*");
       if (invErr) { console.error("Inventory fetch error:", invErr.message); }
@@ -190,15 +281,128 @@ export default function Home() {
     return Object.values(map);
   }, [filteredRows, weekLabels]);
 
+  const demandChartData = useMemo(() => {
+    const toDateKey = (d: Date) => {
+      const y = d.getFullYear();
+      const m = String(d.getMonth() + 1).padStart(2, "0");
+      const day = String(d.getDate()).padStart(2, "0");
+      return `${y}-${m}-${day}`;
+    };
+    const normalize = (raw: string) => {
+      if (!raw) return "";
+      // Handle "M/D/YYYY", "MM/DD/YYYY", or ISO "YYYY-MM-DD"
+      const slash = raw.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+      if (slash) {
+        const [, m, d, y] = slash;
+        return `${y}-${m.padStart(2, "0")}-${d.padStart(2, "0")}`;
+      }
+      const iso = raw.match(/^(\d{4})-(\d{2})-(\d{2})/);
+      if (iso) return iso[0];
+      const dt = new Date(raw);
+      if (isNaN(dt.getTime())) return "";
+      return toDateKey(dt);
+    };
+
+    // Find the most recent COMPLETE historical week. The backend drops the
+    // latest date as incomplete (matches the CSV cleaner). We do the same so
+    // the chart anchors on real, fully-recorded weeks.
+    const histDateSet = new Set<string>();
+    historicalRows.forEach((r) => {
+      const k = normalize(r.Date);
+      if (k) histDateSet.add(k);
+    });
+    const sortedHistDates = Array.from(histDateSet).sort();
+    const usableHistDates = sortedHistDates.slice(0, -1); // drop most recent (incomplete)
+
+    let histEnd: Date | null = null;
+    if (usableHistDates.length > 0) {
+      const last = usableHistDates[usableHistDates.length - 1];
+      const [y, m, d] = last.split("-").map(Number);
+      histEnd = new Date(y, m - 1, d);
+      histEnd.setHours(0, 0, 0, 0);
+    }
+    // Forecast starts the Monday immediately after the last complete historical week
+    const forecastStart = histEnd
+      ? (() => { const d = new Date(histEnd); d.setDate(d.getDate() + 7); return d; })()
+      : getNextMonday();
+
+    const data: Array<{ week: string; historical: number | null; forecastOriginal: number | null; forecastAdjusted: number | null }> = [];
+
+    // 8 historical weeks ending at histEnd (inclusive)
+    if (histEnd) {
+      for (let i = 7; i >= 0; i--) {
+        const d = new Date(histEnd);
+        d.setDate(d.getDate() - i * 7);
+        const key = toDateKey(d);
+        let total = 0;
+        historicalRows.forEach((r) => {
+          if (normalize(r.Date) !== key) return;
+          if (chartBrand && r.ProductName !== chartBrand) return;
+          if (demandViewLevel === "packaging") {
+            if (chartChannel && r.Channel !== chartChannel) return;
+            if (chartPackaging && r.PackagingTypeName !== chartPackaging) return;
+          }
+          const bbl = Number(r["Sales Vol"]) || 0;
+          // Convert per-row using the row's actual packaging type so the sum
+          // stays accurate regardless of which packagings are aggregated.
+          total += convertBblTo(bbl, r.PackagingTypeName, unitMode);
+        });
+        data.push({ week: formatWeekLabel(d), historical: total, forecastOriginal: null, forecastAdjusted: null });
+      }
+    }
+
+    // Next 8 forecast weeks
+    const scoped = rows.filter((r) => {
+      const levelMatch = demandViewLevel === "product"
+        ? r.packaging_format === "ALL"
+        : r.packaging_format !== "ALL";
+      if (!levelMatch) return false;
+      if (chartBrand && r.brand !== chartBrand) return false;
+      if (chartChannel && r.channel !== chartChannel) return false;
+      if (chartPackaging && r.packaging_format !== chartPackaging) return false;
+      return true;
+    });
+    let hasOverrides = false;
+    for (let w = 1; w <= 8; w++) {
+      const d = new Date(forecastStart);
+      d.setDate(d.getDate() + (w - 1) * 7);
+      let original = 0;
+      let adjusted = 0;
+      scoped.forEach((r) => {
+        if (r.week_number === w) {
+          original += convertBblTo(r.previous_value ?? 0, r.packaging_format, unitMode);
+          adjusted += convertBblTo(getEffectiveOrForecast(r), r.packaging_format, unitMode);
+          if (r.effective_value != null && r.effective_value !== r.previous_value) hasOverrides = true;
+        }
+      });
+      data.push({ week: formatWeekLabel(d), historical: null, forecastOriginal: original, forecastAdjusted: adjusted });
+    }
+    return { data, hasOverrides };
+  }, [rows, historicalRows, demandViewLevel, chartBrand, chartChannel, chartPackaging, unitMode]);
+
   const pivotRows = useMemo(() => {
     const grouped: Record<string, PivotRow> = {};
-    filteredRows.forEach((r) => {
+    const scopedRows = filteredRows.filter((r) =>
+      demandViewLevel === "product"
+        ? r.packaging_format === "ALL"
+        : r.packaging_format !== "ALL"
+    );
+    scopedRows.forEach((r) => {
       const key = `${r.brand}||${r.channel}||${r.packaging_format}`;
       if (!grouped[key]) grouped[key] = { key, brand: r.brand, channel: r.channel, packaging_format: r.packaging_format, Week1: null, Week2: null, Week3: null, Week4: null, Week5: null, Week6: null, Week7: null, Week8: null };
       if (r.week_number >= 1 && r.week_number <= 8) grouped[key][`Week${r.week_number}` as keyof PivotRow] = getEffectiveOrForecast(r) as never;
     });
-    return Object.values(grouped);
-  }, [filteredRows]);
+    const isAllZero = (r: PivotRow) =>
+      [1, 2, 3, 4, 5, 6, 7, 8].every((w) => {
+        const v = r[`Week${w}` as keyof PivotRow];
+        return v == null || Number(v) === 0;
+      });
+    return Object.values(grouped).sort((a, b) => {
+      const az = isAllZero(a), bz = isAllZero(b);
+      if (az !== bz) return az ? 1 : -1;
+      return a.brand.localeCompare(b.brand);
+    });
+  }, [filteredRows, demandViewLevel]);
 
   const productLevelRows = useMemo(() => {
     const grouped: Record<string, ProductLevelRow> = {};
@@ -272,6 +476,42 @@ export default function Home() {
           setPendingEdit({ context: 'brewing', brand, weekIndex, newValue: value });
       }
   };
+
+  function downloadDemandCsv() {
+    const weekHeaders = weekLabels.map((l) => `${l} (${unitMode})`);
+    const headers = demandViewLevel === "product"
+      ? ["Brand", ...weekHeaders]
+      : ["Brand", "Channel", "Packaging", ...weekHeaders];
+    const escape = (v: unknown) => {
+      const s = v == null ? "" : String(v);
+      return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+    };
+    const lines = [headers.map(escape).join(",")];
+    pivotRows.forEach((row) => {
+      const cells = demandViewLevel === "product"
+        ? [row.brand]
+        : [row.brand, row.channel, row.packaging_format];
+      [1, 2, 3, 4, 5, 6, 7, 8].forEach((w) => {
+        const v = row[`Week${w}` as keyof PivotRow];
+        if (v == null || v === "") {
+          cells.push("");
+        } else {
+          const converted = convertBblTo(Number(v), row.packaging_format, unitMode);
+          cells.push(converted.toFixed(4));
+        }
+      });
+      lines.push(cells.map(escape).join(","));
+    });
+    const blob = new Blob([lines.join("\n")], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `demand-plan-${demandViewLevel}-${unitMode.toLowerCase()}-${new Date().toISOString().slice(0, 10)}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
 
   async function savePendingEdit() {
     if (!pendingEdit) return;
@@ -527,40 +767,143 @@ export default function Home() {
       <>
         <div style={chartCardStyle}>
           <div style={{ marginBottom: "8px" }}>
-            <h2 style={{ margin: 0, fontSize: "28px", fontWeight: 700 }}>Demand Plan</h2>
+            <h2 style={{ margin: 0, fontSize: "28px", fontWeight: 700 }}>Forecasted Demand</h2>
             <p style={{ marginTop: "8px", marginBottom: 0, color: "#6b7280" }}>Current session: {sessionId}</p>
           </div>
-          <div style={{ display: "flex", gap: "12px", marginTop: "20px" }}>
-            <button onClick={() => setShowDemandContent(true)} style={{ background: "#111827", color: "white", border: "none", borderRadius: "12px", padding: "12px 18px", fontWeight: 600, cursor: "pointer" }}>Load Latest Forecast</button>
+          <div style={{ display: "flex", gap: "12px", marginTop: "20px", flexWrap: "wrap" }}>
+            <button onClick={() => setShowDemandContent(true)} style={{ background: "#111827", color: "white", border: "none", borderRadius: "12px", padding: "12px 18px", fontWeight: 600, cursor: "pointer" }}>
+              Load Latest Forecast{latestForecastDate ? ` (${latestForecastDate})` : ""}
+            </button>
+            <button
+              onClick={handleGenerateForecast}
+              disabled={isGenerating}
+              style={{ background: isGenerating ? "#6b7280" : "#2563eb", color: "white", border: "none", borderRadius: "12px", padding: "12px 18px", fontWeight: 600, cursor: isGenerating ? "wait" : "pointer" }}
+            >
+              {isGenerating ? "Generating... (may take a while)" : "Generate New Forecast"}
+            </button>
+            {showDemandContent && (
+              <button
+                onClick={() => {
+                  setShowDemandContent(true);
+                  setTimeout(() => demandChartRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 50);
+                }}
+                style={{ background: "white", color: "#111827", border: "1px solid #d1d5db", borderRadius: "12px", padding: "12px 18px", fontWeight: 600, cursor: "pointer" }}
+              >
+                Visualize Forecast ↓
+              </button>
+            )}
           </div>
         </div>
 
         {showDemandContent && (
           <div style={tableCardStyle}>
-            <div style={{ padding: "24px" }}><h3 style={{ margin: 0 }}>Editable Demand Table</h3></div>
+            <div style={{ padding: "24px", display: "flex", justifyContent: "space-between", alignItems: "center", gap: "16px", flexWrap: "wrap" }}>
+              <h3 style={{ margin: 0 }}>Editable Demand Table</h3>
+              <div style={{ display: "flex", gap: "12px", alignItems: "center", flexWrap: "wrap" }}>
+                <button
+                  onClick={downloadDemandCsv}
+                  style={{ background: "white", color: "#111827", border: "1px solid #d1d5db", borderRadius: "10px", padding: "8px 14px", fontWeight: 600, fontSize: "13px", cursor: "pointer" }}
+                >
+                  Download CSV
+                </button>
+              <div style={{ display: "flex", gap: "4px", padding: "4px", background: "#f1f5f9", borderRadius: "10px" }}>
+                <button
+                  onClick={() => setDemandViewLevel("product")}
+                  style={{
+                    padding: "8px 16px", borderRadius: "8px", border: "none",
+                    background: demandViewLevel === "product" ? "white" : "transparent",
+                    color: demandViewLevel === "product" ? "#111827" : "#6b7280",
+                    fontWeight: 600, fontSize: "13px", cursor: "pointer",
+                    boxShadow: demandViewLevel === "product" ? "0 1px 2px rgba(0,0,0,0.08)" : "none",
+                  }}
+                >
+                  Product Level
+                </button>
+                <button
+                  onClick={() => setDemandViewLevel("packaging")}
+                  style={{
+                    padding: "8px 16px", borderRadius: "8px", border: "none",
+                    background: demandViewLevel === "packaging" ? "white" : "transparent",
+                    color: demandViewLevel === "packaging" ? "#111827" : "#6b7280",
+                    fontWeight: 600, fontSize: "13px", cursor: "pointer",
+                    boxShadow: demandViewLevel === "packaging" ? "0 1px 2px rgba(0,0,0,0.08)" : "none",
+                  }}
+                >
+                  Packaging Level
+                </button>
+              </div>
+              <div style={{ display: "flex", gap: "4px", padding: "4px", background: "#f1f5f9", borderRadius: "10px" }}>
+                <button
+                  onClick={() => setUnitMode("BBL")}
+                  style={{
+                    padding: "8px 14px", borderRadius: "8px", border: "none",
+                    background: unitMode === "BBL" ? "white" : "transparent",
+                    color: unitMode === "BBL" ? "#111827" : "#6b7280",
+                    fontWeight: 600, fontSize: "13px", cursor: "pointer",
+                    boxShadow: unitMode === "BBL" ? "0 1px 2px rgba(0,0,0,0.08)" : "none",
+                  }}
+                >
+                  BBL
+                </button>
+                <button
+                  onClick={() => setUnitMode("CE")}
+                  style={{
+                    padding: "8px 14px", borderRadius: "8px", border: "none",
+                    background: unitMode === "CE" ? "white" : "transparent",
+                    color: unitMode === "CE" ? "#111827" : "#6b7280",
+                    fontWeight: 600, fontSize: "13px", cursor: "pointer",
+                    boxShadow: unitMode === "CE" ? "0 1px 2px rgba(0,0,0,0.08)" : "none",
+                  }}
+                >
+                  CE
+                </button>
+              </div>
+              </div>
+            </div>
             <div style={{ overflowX: "auto" }}>
               <table style={{ width: "100%", minWidth: "1200px", borderCollapse: "collapse" }}>
                 <thead>
                   <tr style={{ background: "#f8fafc" }}>
-                    {["Brand", "Channel", "Packaging", ...weekLabels].map((h) => <th key={h} style={{ textAlign: "left", padding: "14px 16px", borderBottom: "1px solid #e5e7eb", fontSize: "13px", color: "#374151" }}>{h}</th>)}
+                    {(demandViewLevel === "product"
+                      ? ["Brand", ...weekLabels.map((l) => `${l} (${unitMode})`)]
+                      : ["Brand", "Channel", "Packaging", ...weekLabels.map((l) => `${l} (${unitMode})`)]
+                    ).map((h) => <th key={h} style={{ textAlign: "left", padding: "14px 16px", borderBottom: "1px solid #e5e7eb", fontSize: "13px", color: "#374151" }}>{h}</th>)}
                   </tr>
                 </thead>
                 <tbody>
                   {pivotRows.map((row, index) => (
                     <tr key={row.key} style={{ background: index % 2 === 0 ? "white" : "#fcfcfd" }}>
-                      <td style={cellStyle}>{row.brand}</td><td style={cellStyle}>{row.channel}</td><td style={cellStyle}>{row.packaging_format}</td>
+                      <td style={cellStyle}>{row.brand}</td>
+                      {demandViewLevel === "packaging" && (
+                        <>
+                          <td style={cellStyle}>{row.channel}</td>
+                          <td style={cellStyle}>{row.packaging_format}</td>
+                        </>
+                      )}
                       {[1, 2, 3, 4, 5, 6, 7, 8].map((w) => {
-                          const currentVal = row[`Week${w}` as keyof PivotRow] ?? "";
+                          const rawBbl = row[`Week${w}` as keyof PivotRow];
+                          const displayVal = rawBbl == null || rawBbl === ""
+                            ? ""
+                            : convertBblTo(Number(rawBbl), row.packaging_format, unitMode);
+                          const ratio = unitMode === "CE"
+                            ? (CE_PER_BBL[row.packaging_format] ?? CE_PER_BBL_DEFAULT)
+                            : 1;
                           return (
                             <td key={w} style={cellStyle}>
                                 <input
-                                    key={`demand-${row.key}-${w}-${currentVal}-${cancelTick}`}
+                                    key={`demand-${row.key}-${w}-${unitMode}-${rawBbl}-${cancelTick}`}
                                     type="number"
-                                    defaultValue={currentVal}
+                                    defaultValue={displayVal === "" ? "" : Number(displayVal).toFixed(2).replace(/\.00$/, "")}
                                     onBlur={(e) => {
-                                        if(e.target.value !== "" && String(e.target.value) !== String(currentVal)) {
-                                            setPendingEdit({ context: 'demand', demandPivotRow: row, weekNumber: w, newValue: e.target.value, brand: row.brand })
-                                        }
+                                        if (e.target.value === "") return;
+                                        const enteredDisplay = Number(e.target.value);
+                                        if (!Number.isFinite(enteredDisplay)) return;
+                                        // Convert displayed unit back to BBL for storage
+                                        const enteredBbl = unitMode === "CE" ? enteredDisplay / ratio : enteredDisplay;
+                                        const currentBbl = rawBbl == null || rawBbl === "" ? null : Number(rawBbl);
+                                        // Compare in BBL space with a tiny tolerance to avoid float noise
+                                        if (currentBbl != null && Math.abs(enteredBbl - currentBbl) < 1e-6) return;
+                                        setPendingEdit({ context: 'demand', demandPivotRow: row, weekNumber: w, newValue: String(enteredBbl), brand: row.brand })
                                     }}
                                     style={inputStyle}
                                 />
@@ -571,6 +914,61 @@ export default function Home() {
                   ))}
                 </tbody>
               </table>
+            </div>
+          </div>
+        )}
+
+        {showDemandContent && (
+          <div ref={demandChartRef} style={chartCardStyle}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "16px", flexWrap: "wrap", marginBottom: "16px" }}>
+              <div>
+                <h3 style={{ margin: 0, fontSize: "18px", fontWeight: 700 }}>Forecasted Demand</h3>
+                <p style={{ margin: "4px 0 0 0", color: "#6b7280", fontSize: "13px" }}>
+                  Prior 8 weeks of actuals vs next 8 weeks of forecast ({demandViewLevel === "product" ? "product-level" : "packaging-level"}, in {unitMode}).
+                </p>
+              </div>
+              <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+                <select value={chartBrand} onChange={(e) => setChartBrand(e.target.value)} style={{ ...selectStyle, width: "160px" }}>
+                  <option value="">All Brands</option>
+                  {products.map((p) => <option key={p} value={p}>{p}</option>)}
+                </select>
+                {demandViewLevel === "packaging" && (
+                  <>
+                    <select value={chartChannel} onChange={(e) => setChartChannel(e.target.value)} style={{ ...selectStyle, width: "140px" }}>
+                      <option value="">All Channels</option>
+                      {channels.filter((c) => c !== "all").map((c) => <option key={c} value={c}>{c}</option>)}
+                    </select>
+                    <select value={chartPackaging} onChange={(e) => setChartPackaging(e.target.value)} style={{ ...selectStyle, width: "200px" }}>
+                      <option value="">All Packaging</option>
+                      {packagingFormats.filter((p) => p !== "ALL").map((p) => <option key={p} value={p}>{p}</option>)}
+                    </select>
+                  </>
+                )}
+              </div>
+            </div>
+            <div style={{ width: "100%", height: 320 }}>
+              <ResponsiveContainer width="100%" height="100%">
+                <LineChart data={demandChartData.data} margin={{ top: 8, right: 16, left: 0, bottom: 8 }}>
+                  <CartesianGrid strokeDasharray="3 3" vertical={false} />
+                  <XAxis dataKey="week" tick={{ fontSize: 11 }} />
+                  <YAxis tick={{ fontSize: 11 }} />
+                  <Tooltip />
+                  <Legend />
+                  <Line type="monotone" dataKey="historical" name={`Actual (${unitMode})`} stroke="#94a3b8" strokeWidth={2} dot={{ r: 3 }} connectNulls={false} />
+                  {demandChartData.hasOverrides ? (
+                    <Line type="monotone" dataKey="forecastOriginal" name={`Original Forecast (${unitMode})`} stroke="#93c5fd" strokeWidth={2} strokeDasharray="5 4" dot={{ r: 2 }} connectNulls={false} />
+                  ) : null}
+                  <Line
+                    type="monotone"
+                    dataKey="forecastAdjusted"
+                    name={demandChartData.hasOverrides ? `Adjusted Forecast (${unitMode})` : `Forecast (${unitMode})`}
+                    stroke={demandChartData.hasOverrides ? "#f59e0b" : "#2563eb"}
+                    strokeWidth={demandChartData.hasOverrides ? 3 : 2.5}
+                    dot={{ r: 3 }}
+                    connectNulls={false}
+                  />
+                </LineChart>
+              </ResponsiveContainer>
             </div>
           </div>
         )}

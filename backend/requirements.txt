@@ -1,0 +1,11 @@
+pandas
+numpy
+statsmodels
+pmdarima
+lightgbm
+xgboost
+scikit-learn
+supabase
+python-dotenv
+fastapi
+uvicorn
