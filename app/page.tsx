@@ -196,6 +196,12 @@ export default function Home() {
 
   async function resetPlanWorkflow() {
     persistPlanWorkflow(emptyPlanWorkflow);
+    setInventoryDB((prev) => prev.map((item) => ({
+      ...item,
+      startInv: item.originalStartInv,
+      finalSS: item.baseSafetyStock,
+    })));
+    setManualBrewPlan({});
     if (sessionId) {
       const { error: resetErr } = await supabase
         .from("demand_plans")
