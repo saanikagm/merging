@@ -564,12 +564,13 @@ export default function Home() {
 
   const productLevelRows = useMemo(() => {
     const grouped: Record<string, ProductLevelRow> = {};
-    filteredRows.forEach((r) => {
+    rows.forEach((r) => {
+      if (r.packaging_format !== "ALL") return;
       if (!grouped[r.brand]) grouped[r.brand] = { brand: r.brand, Week1: 0, Week2: 0, Week3: 0, Week4: 0, Week5: 0, Week6: 0, Week7: 0, Week8: 0 };
       if (r.week_number >= 1 && r.week_number <= 8) (grouped[r.brand][`Week${r.week_number}` as keyof ProductLevelRow] as number) += getEffectiveOrForecast(r);
     });
     return Object.values(grouped).sort((a, b) => a.brand.localeCompare(b.brand));
-  }, [filteredRows]);
+  }, [rows]);
 
   // --- MEMOS (OPERATIONS) ---
   const enrichedInventoryDB = useMemo(() => {
