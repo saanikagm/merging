@@ -1124,7 +1124,9 @@ export default function Home() {
                                     key={`demand-${row.key}-${w}-${unitMode}-${rawBbl}-${cancelTick}`}
                                     type="number"
                                     defaultValue={displayVal === "" ? "" : Number(displayVal).toFixed(2).replace(/\.00$/, "")}
+                                    disabled={!!planWorkflow.demandLockedAt}
                                     onBlur={(e) => {
+                                        if (planWorkflow.demandLockedAt) return;
                                         if (e.target.value === "") return;
                                         const enteredDisplay = Number(e.target.value);
                                         if (!Number.isFinite(enteredDisplay)) return;
@@ -1135,7 +1137,7 @@ export default function Home() {
                                         if (currentBbl != null && Math.abs(enteredBbl - currentBbl) < 1e-6) return;
                                         setPendingEdit({ context: 'demand', demandPivotRow: row, weekNumber: w, newValue: String(enteredBbl), brand: row.brand })
                                     }}
-                                    style={inputStyle}
+                                    style={{ ...inputStyle, background: planWorkflow.demandLockedAt ? "#f3f4f6" : undefined, color: planWorkflow.demandLockedAt ? "#6b7280" : undefined, cursor: planWorkflow.demandLockedAt ? "not-allowed" : undefined }}
                                 />
                             </td>
                           )
