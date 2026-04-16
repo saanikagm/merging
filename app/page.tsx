@@ -135,6 +135,7 @@ export default function Home() {
   const emptyPlanWorkflow: PlanWorkflow = { demandLockedAt: null, inventoryLockedAt: null, brewingLockedAt: null };
   const [planWorkflow, setPlanWorkflow] = useState<PlanWorkflow>(emptyPlanWorkflow);
   const [showLockDemandModal, setShowLockDemandModal] = useState(false);
+  const [showLockInventoryModal, setShowLockInventoryModal] = useState(false);
 
   useEffect(() => {
     try {
@@ -185,6 +186,12 @@ export default function Home() {
     persistPlanWorkflow({ ...planWorkflow, demandLockedAt: new Date().toISOString() });
     setShowLockDemandModal(false);
     setActiveTab("Inventory");
+  }
+
+  function lockInventoryPlan() {
+    persistPlanWorkflow({ ...planWorkflow, inventoryLockedAt: new Date().toISOString() });
+    setShowLockInventoryModal(false);
+    setActiveTab("Brewing Plan");
   }
 
   async function resetPlanWorkflow() {
@@ -824,13 +831,28 @@ export default function Home() {
                 <h2 style={{ margin: 0, fontSize: "28px", fontWeight: 700 }}>Inventory Parameters</h2>
                 <p style={{ marginTop: "8px", marginBottom: 0, color: "#6b7280" }}>Adjust global service levels or override specific safety stock buffers.</p>
               </div>
-              <button
-                onClick={refreshInventoryFromTableau}
-                disabled={refreshingInventory}
-                style={{ background: refreshingInventory ? "#6b7280" : "#111827", color: "white", border: "none", borderRadius: "12px", padding: "12px 18px", fontWeight: 600, cursor: refreshingInventory ? "wait" : "pointer" }}
-              >
-                {refreshingInventory ? "Refreshing..." : "Refresh Inventory from Tableau"}
-              </button>
+              <div style={{ display: "flex", gap: "12px", flexWrap: "wrap" }}>
+                <button
+                  onClick={refreshInventoryFromTableau}
+                  disabled={refreshingInventory || !!planWorkflow.inventoryLockedAt}
+                  style={{ background: refreshingInventory || planWorkflow.inventoryLockedAt ? "#6b7280" : "#111827", color: "white", border: "none", borderRadius: "12px", padding: "12px 18px", fontWeight: 600, cursor: refreshingInventory ? "wait" : planWorkflow.inventoryLockedAt ? "not-allowed" : "pointer" }}
+                >
+                  {refreshingInventory ? "Refreshing..." : "Refresh Inventory from Tableau"}
+                </button>
+                {!planWorkflow.inventoryLockedAt && (
+                  <button
+                    onClick={() => setShowLockInventoryModal(true)}
+                    style={{ background: "#047857", color: "white", border: "none", borderRadius: "12px", padding: "12px 18px", fontWeight: 600, cursor: "pointer" }}
+                  >
+                    Lock Inventory Plan
+                  </button>
+                )}
+                {planWorkflow.inventoryLockedAt && (
+                  <div style={{ display: "inline-flex", alignItems: "center", gap: "8px", background: "#ecfdf5", color: "#065f46", border: "1px solid #a7f3d0", borderRadius: "12px", padding: "12px 18px", fontWeight: 600 }}>
+                    Inventory Plan Locked — {formatLockedAt(planWorkflow.inventoryLockedAt)}
+                  </div>
+                )}
+              </div>
             </div>
         </div>
 
@@ -839,7 +861,7 @@ export default function Home() {
                 <h3 style={{ margin: 0, fontSize: "16px", fontWeight: 700 }}>Global Target Service Level</h3>
                 <p style={{ margin: 0, color: "#6b7280", fontSize: "13px" }}>Recalculates safety stock targets for ALL products.</p>
             </div>
-            <select value={globalServiceLevel} onChange={(e) => handleGlobalSLChange(Number(e.target.value))} style={{...selectStyle, width: '200px', fontWeight: 'bold'}}>
+            <select value={globalServiceLevel} disabled={!!planWorkflow.inventoryLockedAt} onChange={(e) => handleGlobalSLChange(Number(e.target.value))} style={{...selectStyle, width: '200px', fontWeight: 'bold', cursor: planWorkflow.inventoryLockedAt ? 'not-allowed' : 'pointer', background: planWorkflow.inventoryLockedAt ? '#f3f4f6' : undefined }}>
                 <option value={85}>85% - Lean</option>
                 <option value={90}>90% - Moderate</option>
                 <option value={95}>95% - Standard</option>
@@ -875,7 +897,9 @@ export default function Home() {
                                         key={`inv-${item.name}-${item.startInv}-${cancelTick}`}
                                         type="number"
                                         defaultValue={item.startInv}
+                                        disabled={!!planWorkflow.inventoryLockedAt}
                                         onBlur={(e) => {
+                                            if (planWorkflow.inventoryLockedAt) return;
                                             if (e.target.value !== "" && Number(e.target.value) !== item.startInv) {
                                                 handleInventoryUpdate(item.name, 'startInv', e.target.value);
                                             }
@@ -898,7 +922,9 @@ export default function Home() {
                                         key={`ss-${item.name}-${item.finalSS}-${cancelTick}`}
                                         type="number"
                                         defaultValue={item.finalSS}
+                                        disabled={!!planWorkflow.inventoryLockedAt}
                                         onBlur={(e) => {
+                                            if (planWorkflow.inventoryLockedAt) return;
                                             if (e.target.value !== "" && Number(e.target.value) !== item.finalSS) {
                                                 handleInventoryUpdate(item.name, 'finalSS', e.target.value);
                                             }
@@ -913,6 +939,31 @@ export default function Home() {
             </table>
           </div>
         </div>
+
+        {showLockInventoryModal && (
+          <div style={{ position: "fixed", inset: 0, background: "rgba(17, 24, 39, 0.5)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000 }}>
+            <div style={{ background: "white", borderRadius: "16px", padding: "28px", maxWidth: "440px", width: "92%", boxShadow: "0 20px 60px rgba(0,0,0,0.25)" }}>
+              <h3 style={{ margin: 0, marginBottom: "12px", fontSize: "20px", fontWeight: 700 }}>Lock Inventory Plan</h3>
+              <p style={{ margin: 0, marginBottom: "24px", color: "#4b5563", lineHeight: 1.5 }}>
+                Once locked, the starting inventory and safety stock values cannot be edited. The locked values will flow into the Brewing Plan as the basis for production scheduling. Are you sure you want to continue?
+              </p>
+              <div style={{ display: "flex", gap: "12px", justifyContent: "flex-end" }}>
+                <button
+                  onClick={() => setShowLockInventoryModal(false)}
+                  style={{ background: "white", color: "#111827", border: "1px solid #d1d5db", borderRadius: "10px", padding: "10px 16px", fontWeight: 600, cursor: "pointer" }}
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={lockInventoryPlan}
+                  style={{ background: "#047857", color: "white", border: "none", borderRadius: "10px", padding: "10px 16px", fontWeight: 600, cursor: "pointer" }}
+                >
+                  Lock Inventory Plan
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     );
   }
