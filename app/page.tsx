@@ -376,18 +376,51 @@ export default function Home() {
         console.error("Tableau inventory fetch error:", e);
       }
 
-      const initialInv = Object.entries(totalsByProduct).map(([name, total]) => ({
-        name,
-        startInv: Number(total.toFixed(2)),
-        originalStartInv: Number(total.toFixed(2)),
-        baseSafetyStock: 10,
-        finalSS: 10,
-      }));
+      // Compute per-product weekly standard deviation from historical sales.
+      const weeklyByProduct: Record<string, Record<string, number>> = {};
+      fetchedHist.forEach((r) => {
+        const d = new Date(r.Date);
+        if (Number.isNaN(d.getTime())) return;
+        const year = d.getUTCFullYear();
+        const start = Date.UTC(year, 0, 1);
+        const week = Math.floor((d.getTime() - start) / (7 * 24 * 3600 * 1000)) + 1;
+        const bucket = `${year}-${week}`;
+        const name = r.ProductName || "Unknown";
+        weeklyByProduct[name] ||= {};
+        weeklyByProduct[name][bucket] = (weeklyByProduct[name][bucket] || 0) + (Number(r["Sales Vol"]) || 0);
+      });
+
+      function stdDev(values: number[]): number {
+        if (values.length < 2) return 0;
+        const mean = values.reduce((s, v) => s + v, 0) / values.length;
+        const variance = values.reduce((s, v) => s + (v - mean) ** 2, 0) / (values.length - 1);
+        return Math.sqrt(variance);
+      }
+
+      function baseSSFor(product: string): number {
+        const buckets = weeklyByProduct[product];
+        if (!buckets) return 10;
+        const vals = Object.values(buckets);
+        const sigma = stdDev(vals);
+        return Number(sigma.toFixed(2)) || 10;
+      }
+
+      const initialInv = Object.entries(totalsByProduct).map(([name, total]) => {
+        const base = baseSSFor(name);
+        return {
+          name,
+          startInv: Number(total.toFixed(2)),
+          originalStartInv: Number(total.toFixed(2)),
+          baseSafetyStock: base,
+          finalSS: base,
+        };
+      });
 
       const uniqueDemandBrands = [...new Set(fetchedDemand.map(r => r.brand))];
       uniqueDemandBrands.forEach(brand => {
           if (!initialInv.find(i => i.name === brand)) {
-              initialInv.push({ name: brand, startInv: 0, originalStartInv: 0, baseSafetyStock: 10, finalSS: 10 });
+              const base = baseSSFor(brand);
+              initialInv.push({ name: brand, startInv: 0, originalStartInv: 0, baseSafetyStock: base, finalSS: base });
           }
       });
 
