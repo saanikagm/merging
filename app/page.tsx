@@ -187,8 +187,19 @@ export default function Home() {
     setActiveTab("Inventory");
   }
 
-  function resetPlanWorkflow() {
+  async function resetPlanWorkflow() {
     persistPlanWorkflow(emptyPlanWorkflow);
+    if (sessionId) {
+      const { error: resetErr } = await supabase
+        .from("demand_plans")
+        .update({ effective_value: null, override_rationale: null })
+        .eq("session_id", sessionId);
+      if (resetErr) {
+        console.error("Failed to reset demand overrides:", resetErr.message);
+        return;
+      }
+      setRows((prev) => prev.map((r) => ({ ...r, effective_value: null })));
+    }
   }
 
   const hasAnyLock = !!(planWorkflow.demandLockedAt || planWorkflow.inventoryLockedAt || planWorkflow.brewingLockedAt);
@@ -981,11 +992,11 @@ export default function Home() {
             <p style={{ marginTop: "8px", marginBottom: 0, color: "#6b7280" }}>Current session: {sessionId}</p>
           </div>
           <div style={{ display: "flex", gap: "12px", marginTop: "20px", flexWrap: "wrap" }}>
-            <button onClick={() => requestResetThen(() => { resetPlanWorkflow(); setShowDemandContent(true); })} style={{ background: "#111827", color: "white", border: "none", borderRadius: "12px", padding: "12px 18px", fontWeight: 600, cursor: "pointer" }}>
+            <button onClick={() => requestResetThen(async () => { await resetPlanWorkflow(); setShowDemandContent(true); })} style={{ background: "#111827", color: "white", border: "none", borderRadius: "12px", padding: "12px 18px", fontWeight: 600, cursor: "pointer" }}>
               Load Latest Forecast{latestForecastDate ? ` (${latestForecastDate})` : ""}
             </button>
             <button
-              onClick={() => requestResetThen(() => { resetPlanWorkflow(); handleGenerateForecast(); })}
+              onClick={() => requestResetThen(async () => { await resetPlanWorkflow(); handleGenerateForecast(); })}
               disabled={isGenerating}
               style={{ background: isGenerating ? "#6b7280" : "#2563eb", color: "white", border: "none", borderRadius: "12px", padding: "12px 18px", fontWeight: 600, cursor: isGenerating ? "wait" : "pointer" }}
             >
