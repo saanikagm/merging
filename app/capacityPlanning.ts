@@ -4,7 +4,6 @@ export function generateCapacityPlan(name: string, forecasts: number[], startInv
     let plannedRelease = [];
 
     let currentInv = startInv;
-    const batchSize = 50;
     const leadTime = 2;
 
     for (let i = 0; i < 8; i++) {
@@ -16,11 +15,12 @@ export function generateCapacityPlan(name: string, forecasts: number[], startInv
 
         if (isManual) {
             receipt = manualReleases[i - leadTime];
-        } else {
-            if (projectedInv < safetyStock) {
-                let gap = safetyStock - projectedInv;
-                receipt = Math.ceil(gap / batchSize) * batchSize;
+        } else if (demand > 0) {
+            receipt = demand;
+            if (projectedInv + receipt < safetyStock) {
+                receipt += safetyStock - (projectedInv + receipt);
             }
+            receipt = Math.round(receipt * 100) / 100;
         }
 
         plannedReceipt.push(receipt);
