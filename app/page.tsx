@@ -1002,6 +1002,43 @@ export default function Home() {
             </div>
         </div>
 
+        <div style={tableCardStyle}>
+            <div style={{ padding: "24px" }}>
+              <h3 style={{ margin: 0, fontSize: "20px", fontWeight: 700 }}>Brew Schedule by Product</h3>
+              <p style={{ margin: 0, marginTop: "4px", color: "#6b7280", fontSize: "13px" }}>Planned brew releases (BBL) for each product across the planning horizon.</p>
+            </div>
+            <div style={{ overflowX: "auto" }}>
+              <table style={{ width: "100%", minWidth: "700px", borderCollapse: "collapse" }}>
+                <thead>
+                  <tr style={{ background: "#f8fafc" }}>
+                    <th style={{ textAlign: "left", padding: "14px 16px", borderBottom: "1px solid #e5e7eb", fontSize: "13px", fontWeight: 700 }}>Brand</th>
+                    {weekLabels.slice(0, 6).map(lbl => (
+                      <th key={lbl} style={{ textAlign: "center", padding: "14px 16px", borderBottom: "1px solid #e5e7eb", fontSize: "13px", fontWeight: 700, color: "#2563eb" }}>{lbl}</th>
+                    ))}
+                    <th style={{ textAlign: "center", padding: "14px 16px", borderBottom: "1px solid #e5e7eb", fontSize: "13px", fontWeight: 700 }}>Total</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {Object.entries(masterSchedule.productBreakdown).sort(([a], [b]) => a.localeCompare(b)).map(([brand, weeks], idx) => {
+                    const total = weeks.reduce((s, v) => s + v, 0);
+                    if (total === 0) return null;
+                    return (
+                      <tr key={brand} style={{ background: idx % 2 === 0 ? "white" : "#fcfcfd" }}>
+                        <td style={{ ...cellStyle, fontWeight: "bold" }}>{brand}</td>
+                        {weeks.map((v, i) => (
+                          <td key={i} style={{ ...cellStyle, textAlign: "center", color: v > 0 ? "#047857" : "#9ca3af", fontWeight: v > 0 ? 700 : 400 }}>
+                            {v > 0 ? formatNumber(v) : "-"}
+                          </td>
+                        ))}
+                        <td style={{ ...cellStyle, textAlign: "center", fontWeight: 700 }}>{formatNumber(total)}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+        </div>
+
         <div style={filterCardStyle}>
             <label style={labelStyle}>View Specific Brewing Instructions</label>
             <select value={selectedOpsProduct} onChange={(e) => setSelectedOpsProduct(e.target.value)} style={selectStyle}>
