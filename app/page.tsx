@@ -1000,37 +1000,32 @@ export default function Home() {
                     )
                 })}
             </div>
-        </div>
 
-        <div style={tableCardStyle}>
-            <div style={{ padding: "24px" }}>
-              <h3 style={{ margin: 0, fontSize: "20px", fontWeight: 700 }}>Brew Schedule by Product</h3>
-              <p style={{ margin: 0, marginTop: "4px", color: "#6b7280", fontSize: "13px" }}>Planned brew releases (BBL) for each product across the planning horizon.</p>
-            </div>
-            <div style={{ overflowX: "auto" }}>
-              <table style={{ width: "100%", minWidth: "700px", borderCollapse: "collapse" }}>
+            <div style={{ marginTop: '24px', borderTop: '1px solid #334155', paddingTop: '20px' }}>
+              <h3 style={{ margin: 0, marginBottom: '16px', fontSize: '16px', fontWeight: 700, color: '#94a3b8' }}>Brew Schedule by Product</h3>
+              <table style={{ width: "100%", borderCollapse: "collapse" }}>
                 <thead>
-                  <tr style={{ background: "#f8fafc" }}>
-                    <th style={{ textAlign: "left", padding: "14px 16px", borderBottom: "1px solid #e5e7eb", fontSize: "13px", fontWeight: 700 }}>Brand</th>
+                  <tr>
+                    <th style={{ textAlign: "left", padding: "8px 12px", borderBottom: "1px solid #334155", fontSize: "12px", color: "#64748b" }}>Brand</th>
                     {weekLabels.slice(0, 6).map(lbl => (
-                      <th key={lbl} style={{ textAlign: "center", padding: "14px 16px", borderBottom: "1px solid #e5e7eb", fontSize: "13px", fontWeight: 700, color: "#2563eb" }}>{lbl}</th>
+                      <th key={lbl} style={{ textAlign: "center", padding: "8px 12px", borderBottom: "1px solid #334155", fontSize: "12px", color: "#64748b" }}>{lbl}</th>
                     ))}
-                    <th style={{ textAlign: "center", padding: "14px 16px", borderBottom: "1px solid #e5e7eb", fontSize: "13px", fontWeight: 700 }}>Total</th>
+                    <th style={{ textAlign: "center", padding: "8px 12px", borderBottom: "1px solid #334155", fontSize: "12px", color: "#64748b" }}>Total</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {Object.entries(masterSchedule.productBreakdown).sort(([a], [b]) => a.localeCompare(b)).map(([brand, weeks], idx) => {
+                  {Object.entries(masterSchedule.productBreakdown).sort(([a], [b]) => a.localeCompare(b)).map(([brand, weeks]) => {
                     const total = weeks.reduce((s, v) => s + v, 0);
                     if (total === 0) return null;
                     return (
-                      <tr key={brand} style={{ background: idx % 2 === 0 ? "white" : "#fcfcfd" }}>
-                        <td style={{ ...cellStyle, fontWeight: "bold" }}>{brand}</td>
+                      <tr key={brand} style={{ borderBottom: '1px solid #1e293b' }}>
+                        <td style={{ padding: '10px 12px', color: '#e2e8f0', fontWeight: 600, fontSize: '13px' }}>{brand}</td>
                         {weeks.map((v, i) => (
-                          <td key={i} style={{ ...cellStyle, textAlign: "center", color: v > 0 ? "#047857" : "#9ca3af", fontWeight: v > 0 ? 700 : 400 }}>
+                          <td key={i} style={{ padding: '10px 12px', textAlign: 'center', fontSize: '14px', fontWeight: v > 0 ? 700 : 400, color: v > 0 ? '#34d399' : '#475569' }}>
                             {v > 0 ? formatNumber(v) : "-"}
                           </td>
                         ))}
-                        <td style={{ ...cellStyle, textAlign: "center", fontWeight: 700 }}>{formatNumber(total)}</td>
+                        <td style={{ padding: '10px 12px', textAlign: 'center', fontSize: '14px', fontWeight: 700, color: '#e2e8f0' }}>{formatNumber(total)}</td>
                       </tr>
                     );
                   })}
