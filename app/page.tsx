@@ -137,6 +137,49 @@ export default function Home() {
   const [showLockDemandModal, setShowLockDemandModal] = useState(false);
   const [showLockInventoryModal, setShowLockInventoryModal] = useState(false);
 
+  const QUICK_START_KEY = "quickStartSeen";
+  const [showQuickStart, setShowQuickStart] = useState(false);
+  const [quickStartStep, setQuickStartStep] = useState(0);
+
+  useEffect(() => {
+    try {
+      if (!localStorage.getItem(QUICK_START_KEY)) setShowQuickStart(true);
+    } catch {}
+  }, []);
+
+  const QUICK_START_STEPS: Array<{ title: string; body: string }> = [
+    {
+      title: "Welcome to the Brewery Planning App",
+      body: "This tool helps you build a weekly Sales, Inventory & Operations plan for Societe. You'll move through four tabs in order: Overview, Forecasted Demand, Inventory, and Brewing Plan. Each stage locks before the next one starts.",
+    },
+    {
+      title: "Step 1 — Overview",
+      body: "The Overview tab gives you a read-only snapshot: a yearly demand comparison chart and high-level metrics. Start here to orient yourself before making any changes.",
+    },
+    {
+      title: "Step 2 — Forecasted Demand",
+      body: "Click Load Latest Forecast to pull the most recent plan, or Generate New Forecast to run a fresh one (20–30 min, runs on the server — safe to close the tab). Edit any cell to override, with an audit reason. When finished, click Lock Demand Plan.",
+    },
+    {
+      title: "Step 3 — Inventory",
+      body: "Starting inventory is pulled live from Tableau. Adjust the global service level or override safety stock values per product. Click Refresh Inventory from Tableau for fresh numbers any time. Click Lock Inventory Plan when ready.",
+    },
+    {
+      title: "Step 4 — Brewing Plan",
+      body: "See weekly facility load at the top, per-product brew schedule below. Use the dropdown to open a specific product and fine-tune individual brews — zero out small ones, shift timing, or override any planned quantity.",
+    },
+    {
+      title: "Starting a new plan",
+      body: "To start over any time, go back to Forecasted Demand and click Load Latest Forecast or Generate New Forecast. A confirmation will clear all locks and edits. You can reopen this guide any time from the Quick Start button at the top.",
+    },
+  ];
+
+  function closeQuickStart() {
+    setShowQuickStart(false);
+    setQuickStartStep(0);
+    try { localStorage.setItem(QUICK_START_KEY, "1"); } catch {}
+  }
+
   useEffect(() => {
     try {
       const raw = localStorage.getItem(PLAN_WORKFLOW_KEY);
@@ -1408,7 +1451,18 @@ export default function Home() {
   return (
     <main style={{ minHeight: "100vh", background: "#f7f7f5", padding: "32px 24px 48px 24px", fontFamily: 'Inter, Arial, sans-serif', color: "#111827" }}>
       <div style={{ maxWidth: "1320px", margin: "0 auto" }}>
-        <div style={{ marginBottom: "24px" }}><h1 style={{ margin: 0, fontSize: "34px", fontFamily: 'Georgia, "Times New Roman", serif' }}>Brewery Planning App</h1><p style={{ margin: 0, color: "#6b7280" }}>Central Coast Analytics</p></div>
+        <div style={{ marginBottom: "24px", display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: "16px", flexWrap: "wrap" }}>
+          <div>
+            <h1 style={{ margin: 0, fontSize: "34px", fontFamily: 'Georgia, "Times New Roman", serif' }}>Brewery Planning App</h1>
+            <p style={{ margin: 0, color: "#6b7280" }}>Central Coast Analytics</p>
+          </div>
+          <button
+            onClick={() => { setQuickStartStep(0); setShowQuickStart(true); }}
+            style={{ background: "white", color: "#111827", border: "1px solid #d1d5db", borderRadius: "12px", padding: "10px 16px", fontWeight: 600, cursor: "pointer" }}
+          >
+            Quick Start Guide
+          </button>
+        </div>
 
         <div style={{ display: "flex", gap: "10px", flexWrap: "wrap", marginBottom: "24px", padding: "8px", background: "white", border: "1px solid #e5e7eb", borderRadius: "16px" }}>
           {TABS.map((tab) => (
@@ -1429,6 +1483,48 @@ export default function Home() {
           </>
         )}
       </div>
+
+      {showQuickStart && (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(17, 24, 39, 0.6)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1100 }}>
+          <div style={{ background: "white", borderRadius: "16px", padding: "32px", maxWidth: "520px", width: "92%", boxShadow: "0 20px 60px rgba(0,0,0,0.25)" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "16px" }}>
+              <span style={{ fontSize: "13px", color: "#6b7280", fontWeight: 600 }}>Step {quickStartStep + 1} of {QUICK_START_STEPS.length}</span>
+              <button onClick={closeQuickStart} style={{ background: "transparent", border: "none", color: "#6b7280", fontSize: "14px", cursor: "pointer", fontWeight: 600 }}>Skip</button>
+            </div>
+            <h3 style={{ margin: 0, marginBottom: "12px", fontSize: "22px", fontWeight: 700 }}>{QUICK_START_STEPS[quickStartStep].title}</h3>
+            <p style={{ margin: 0, marginBottom: "24px", color: "#374151", lineHeight: 1.6, fontSize: "15px" }}>{QUICK_START_STEPS[quickStartStep].body}</p>
+            <div style={{ display: "flex", gap: "6px", marginBottom: "24px" }}>
+              {QUICK_START_STEPS.map((_, i) => (
+                <div key={i} style={{ flex: 1, height: "4px", borderRadius: "2px", background: i <= quickStartStep ? "#111827" : "#e5e7eb" }} />
+              ))}
+            </div>
+            <div style={{ display: "flex", justifyContent: "space-between", gap: "12px" }}>
+              <button
+                onClick={() => setQuickStartStep((s) => Math.max(0, s - 1))}
+                disabled={quickStartStep === 0}
+                style={{ background: "white", color: quickStartStep === 0 ? "#d1d5db" : "#111827", border: "1px solid #d1d5db", borderRadius: "10px", padding: "10px 16px", fontWeight: 600, cursor: quickStartStep === 0 ? "not-allowed" : "pointer" }}
+              >
+                Previous
+              </button>
+              {quickStartStep < QUICK_START_STEPS.length - 1 ? (
+                <button
+                  onClick={() => setQuickStartStep((s) => s + 1)}
+                  style={{ background: "#111827", color: "white", border: "none", borderRadius: "10px", padding: "10px 20px", fontWeight: 600, cursor: "pointer" }}
+                >
+                  Next
+                </button>
+              ) : (
+                <button
+                  onClick={closeQuickStart}
+                  style={{ background: "#047857", color: "white", border: "none", borderRadius: "10px", padding: "10px 20px", fontWeight: 600, cursor: "pointer" }}
+                >
+                  Get Started
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* UNIVERSAL AUDIT MODAL */}
       {pendingEdit && (
