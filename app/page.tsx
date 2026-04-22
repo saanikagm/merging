@@ -150,7 +150,7 @@ export default function Home() {
   const QUICK_START_STEPS: Array<{ title: string; body: string }> = [
     {
       title: "Welcome to the Brewery Planning App",
-      body: "This tool helps you build a weekly Sales, Inventory & Operations plan for Societe. You'll move through four tabs in order: Overview, Forecasted Demand, Inventory, and Brewing Plan. Each stage locks before the next one starts.",
+      body: "This tool helps you build a weekly Sales, Inventory & Operations plan. You'll move through four tabs in order: Overview, Forecasted Demand, Inventory, and Brewing Plan. Each stage locks before the next one starts.",
     },
     {
       title: "Step 1 — Overview",
