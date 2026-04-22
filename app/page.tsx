@@ -1089,6 +1089,16 @@ export default function Home() {
                 <h3 style={{ margin: 0, fontSize: "20px" }}>{opsProductData.name} - Action Plan</h3>
                 <span style={{ fontSize: '18px', fontWeight: 'bold', color: '#7e22ce' }}>Locked SS: {formatNumber(opsProductData.finalSS)}</span>
             </div>
+            {(() => {
+              const plan = generateCapacityPlan(opsProductData.name, opsProductData.forecasts, opsProductData.startInv, opsProductData.finalSS, opsProductData.manualReleases);
+              const lateReceipts = plan.plannedReceipt.slice(0, 2).map((r, i) => r > 0 ? { week: i, amount: r } : null).filter((x): x is { week: number; amount: number } => x !== null);
+              if (lateReceipts.length === 0) return null;
+              return (
+                <div style={{ margin: "0 24px 16px 24px", padding: "12px 16px", background: "#fef3c7", border: "1px solid #f59e0b", borderRadius: "12px", color: "#92400e", fontSize: "13px", fontWeight: 600 }}>
+                  Behind schedule: {lateReceipts.map(r => `${formatNumber(r.amount)} BBL needs to arrive in ${weekLabels[r.week]}`).join(" and ")}. This brew should have started {lateReceipts[0].week === 0 ? "2 weeks ago" : "1 week ago"} — confirm it's already in the tank, or start immediately.
+                </div>
+              );
+            })()}
             <div style={{ overflowX: "auto" }}>
                 <table style={{ width: "100%", minWidth: "900px", borderCollapse: "collapse" }}>
                     <thead>
