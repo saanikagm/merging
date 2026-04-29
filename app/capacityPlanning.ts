@@ -28,8 +28,21 @@ export function generateCapacityPlan(name: string, forecasts: number[], startInv
         projAvailable.push(currentInv);
     }
 
+    // NEW: Aggregate any receipts that fall into the "past due" window
+    let pastDueBrews = 0;
+    for (let j = 0; j < leadTime; j++) {
+        pastDueBrews += plannedReceipt[j] || 0;
+    }
+
     for (let i = 0; i < 6; i++) {
-        plannedRelease.push(manualReleases[i] !== undefined ? manualReleases[i] : (plannedReceipt[i + leadTime] || 0));
+        let release = manualReleases[i] !== undefined ? manualReleases[i] : (plannedReceipt[i + leadTime] || 0);
+
+        // NEW: Force past-due brews into the immediate Week 0 "Start Brewing" schedule
+        if (i === 0 && manualReleases[i] === undefined) {
+            release += pastDueBrews;
+        }
+
+        plannedRelease.push(release);
     }
 
     const displayForecasts = forecasts.slice(0, 6);

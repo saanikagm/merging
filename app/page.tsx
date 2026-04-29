@@ -31,12 +31,10 @@ type ProductLevelRow = {
   Week5: number; Week6: number; Week7: number; Week8: number;
 };
 
-// UPGRADED: Added originalStartInv to track visual overrides
 type InventoryRow = {
   name: string; startInv: number; originalStartInv: number; baseSafetyStock: number; finalSS: number;
 };
 
-// UPGRADED: Added inventoryField to differentiate between Starting Inv and Safety Stock audits
 type PendingAudit = {
   context: "demand" | "inventory" | "brewing";
   brand: string;
@@ -55,9 +53,6 @@ function formatNumber(value: number | null | undefined) { return value == null ?
 function getZRatio(sl: number) { return sl === 99 ? 2.33 / 1.645 : sl === 90 ? 1.28 / 1.645 : sl === 85 ? 1.04 / 1.645 : 1.0; }
 
 // --- UNIT CONVERSION (BBL → CE) ---
-// Ratios derived from CE-per-unit / BBL-per-unit in the brewery's reference table.
-// For packaging types not in the map (or "ALL" rows), fall back to the industry
-// standard 1 BBL = 13.78 CE.
 const CE_PER_BBL_DEFAULT = 13.78;
 const CE_PER_BBL: Record<string, number> = {
   "Keg - 50L": 5.87 / 0.426,
@@ -275,7 +270,6 @@ export default function Home() {
     return new Date(iso).toLocaleString("en-US", { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" });
   }
 
-  // Demand Plan chart filters (independent from table filters)
   const [chartBrand, setChartBrand] = useState("");
   const [chartChannel, setChartChannel] = useState("");
   const [chartPackaging, setChartPackaging] = useState("");
@@ -399,8 +393,6 @@ export default function Home() {
       }
       setRows(fetchedDemand);
 
-      // Fetch all historical demand for the chart (filter client-side because
-      // the Date column may be stored as text in M/D/YYYY format).
       const fetchedHist: HistoricalRow[] = [];
       for (let from = 0; ; from += pageSize) {
         const { data: histData, error: histErr } = await supabase
@@ -414,25 +406,41 @@ export default function Home() {
       }
       setHistoricalRows(fetchedHist);
 
-      const apiUrl = process.env.NEXT_PUBLIC_FORECAST_API_URL || "http://localhost:8000";
-      const apiKey = process.env.NEXT_PUBLIC_FORECAST_API_KEY || "";
+      const { data: invData, error: invErr } = await supabase.from("inventory").select("*");
+      if (invErr) { console.error("Inventory fetch error:", invErr.message); }
+      const rawInv = invData || [];
+
       const totalsByProduct: Record<string, number> = {};
+      const ssByProduct: Record<string, number> = {};
+
+      rawInv.forEach((item: any) => {
+          const name = item.name || item.ProductName || item.brand || item.Brand || "Unknown";
+          const startVol = Number(item.startInv ?? item.starting_inventory ?? item.inventory_bbl ?? item.inventory ?? item["Inventory Volume"] ?? 0);
+          const ssVol = Number(item.finalSS ?? item.safetyStock ?? item.safety_stock ?? item.baseSafetyStock ?? 10);
+
+          if (Number.isFinite(startVol)) totalsByProduct[name] = startVol;
+          if (Number.isFinite(ssVol)) ssByProduct[name] = ssVol;
+      });
+
       try {
-        const invRes = await fetch(`${apiUrl}/inventory`, { headers: { "X-API-Key": apiKey } });
-        if (!invRes.ok) throw new Error(`Inventory fetch failed: ${invRes.status}`);
-        const invJson = await invRes.json();
-        const tableauRows: Array<Record<string, string>> = invJson.rows || [];
-        tableauRows.forEach((r) => {
-          const name = r.ProductName || "Unknown";
-          const vol = Number(r["Inventory Volume"] || 0);
-          if (!Number.isFinite(vol)) return;
-          totalsByProduct[name] = (totalsByProduct[name] || 0) + vol;
-        });
+        const apiUrl = process.env.NEXT_PUBLIC_FORECAST_API_URL || "http://localhost:8000";
+        const apiKey = process.env.NEXT_PUBLIC_FORECAST_API_KEY || "";
+        if (apiUrl) {
+            const invRes = await fetch(`${apiUrl}/inventory`, { headers: { "X-API-Key": apiKey } });
+            if (invRes.ok) {
+                const invJson = await invRes.json();
+                const tableauRows: Array<Record<string, string>> = invJson.rows || [];
+                tableauRows.forEach((r) => {
+                  const name = r.ProductName || r.brand || "Unknown";
+                  const vol = Number(r["Inventory Volume"] || r.startInv || r.starting_inventory || 0);
+                  if (Number.isFinite(vol)) totalsByProduct[name] = vol;
+                });
+            }
+        }
       } catch (e) {
-        console.error("Tableau inventory fetch error:", e);
+        console.log("External API offline or unavailable. Using Supabase inventory.");
       }
 
-      // Compute per-product weekly standard deviation from historical sales.
       const weeklyByProduct: Record<string, Record<string, number>> = {};
       fetchedHist.forEach((r) => {
         const d = new Date(r.Date);
@@ -454,6 +462,7 @@ export default function Home() {
       }
 
       function baseSSFor(product: string): number {
+        if (ssByProduct[product] !== undefined) return ssByProduct[product];
         const buckets = weeklyByProduct[product];
         if (!buckets) return 10;
         const vals = Object.values(buckets);
@@ -489,7 +498,6 @@ export default function Home() {
     loadData();
   }, [sessionId]);
 
-  // --- MEMOS (SAANIKA) ---
   const products = useMemo(() => [...new Set([...rows.map(r => r.brand), ...inventoryDB.map(i => i.name)])].filter(Boolean).sort(), [rows, inventoryDB]);
   const channels = useMemo(() => [...new Set(rows.map((r) => r.channel))].sort(), [rows]);
   const packagingFormats = useMemo(() => [...new Set(rows.map((r) => r.packaging_format))].sort(), [rows]);
@@ -519,7 +527,6 @@ export default function Home() {
     };
     const normalize = (raw: string) => {
       if (!raw) return "";
-      // Handle "M/D/YYYY", "MM/DD/YYYY", or ISO "YYYY-MM-DD"
       const slash = raw.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
       if (slash) {
         const [, m, d, y] = slash;
@@ -532,16 +539,13 @@ export default function Home() {
       return toDateKey(dt);
     };
 
-    // Find the most recent COMPLETE historical week. The backend drops the
-    // latest date as incomplete (matches the CSV cleaner). We do the same so
-    // the chart anchors on real, fully-recorded weeks.
     const histDateSet = new Set<string>();
     historicalRows.forEach((r) => {
       const k = normalize(r.Date);
       if (k) histDateSet.add(k);
     });
     const sortedHistDates = Array.from(histDateSet).sort();
-    const usableHistDates = sortedHistDates.slice(0, -1); // drop most recent (incomplete)
+    const usableHistDates = sortedHistDates.slice(0, -1);
 
     let histEnd: Date | null = null;
     if (usableHistDates.length > 0) {
@@ -550,14 +554,12 @@ export default function Home() {
       histEnd = new Date(y, m - 1, d);
       histEnd.setHours(0, 0, 0, 0);
     }
-    // Forecast starts the Monday immediately after the last complete historical week
     const forecastStart = histEnd
       ? (() => { const d = new Date(histEnd); d.setDate(d.getDate() + 7); return d; })()
       : getNextMonday();
 
     const data: Array<{ week: string; historical: number | null; forecastOriginal: number | null; forecastAdjusted: number | null }> = [];
 
-    // 8 historical weeks ending at histEnd (inclusive)
     if (histEnd) {
       for (let i = 7; i >= 0; i--) {
         const d = new Date(histEnd);
@@ -572,15 +574,12 @@ export default function Home() {
             if (chartPackaging && r.PackagingTypeName !== chartPackaging) return;
           }
           const bbl = Number(r["Sales Vol"]) || 0;
-          // Convert per-row using the row's actual packaging type so the sum
-          // stays accurate regardless of which packagings are aggregated.
           total += convertBblTo(bbl, r.PackagingTypeName, unitMode);
         });
         data.push({ week: formatWeekLabel(d), historical: total, forecastOriginal: null, forecastAdjusted: null });
       }
     }
 
-    // Next 8 forecast weeks
     const scoped = rows.filter((r) => {
       const levelMatch = demandViewLevel === "product"
         ? r.packaging_format === "ALL"
@@ -672,7 +671,6 @@ export default function Home() {
     return Object.values(grouped).sort((a, b) => a.brand.localeCompare(b.brand));
   }, [rows]);
 
-  // --- MEMOS (OPERATIONS) ---
   const enrichedInventoryDB = useMemo(() => {
     return inventoryDB.map(inv => {
         const prod = productLevelRows.find(p => p.brand === inv.name);
@@ -687,6 +685,7 @@ export default function Home() {
   const masterSchedule = useMemo(() => {
       const weeklyTotals = [0,0,0,0,0,0];
       const productBreakdown: Record<string, number[]> = {};
+      const productUrgency: Record<string, 'RED' | 'YELLOW' | 'GREEN'> = {};
       let hasWarning = false;
 
       products.forEach(p => {
@@ -695,13 +694,25 @@ export default function Home() {
           const inv = inventoryDB.find(i => i.name === p) || { startInv: 0, finalSS: 10 };
           const manuals = manualBrewPlan[p] || {};
 
+          const avgDemand = wf.reduce((a, b) => a + b, 0) / 8;
+          const leadTimeDemand = avgDemand * 2;
+          const reorderPoint = inv.finalSS + leadTimeDemand;
+
+          if (inv.startInv <= inv.finalSS) {
+              productUrgency[p] = 'RED';
+          } else if (inv.startInv <= reorderPoint) {
+              productUrgency[p] = 'YELLOW';
+          } else {
+              productUrgency[p] = 'GREEN';
+          }
+
           const plan = generateCapacityPlan(p, wf, inv.startInv, inv.finalSS, manuals);
           productBreakdown[p] = plan.plannedRelease;
           plan.plannedRelease.forEach((r, i) => weeklyTotals[i] += r);
       });
 
       weeklyTotals.forEach(t => { if (t > WARNING_THRESHOLD) hasWarning = true; });
-      return { weeklyTotals, productBreakdown, hasWarning };
+      return { weeklyTotals, productBreakdown, productUrgency, hasWarning };
   }, [products, productLevelRows, inventoryDB, manualBrewPlan]);
 
   const opsProductData = useMemo(() => {
@@ -712,14 +723,12 @@ export default function Home() {
     return { name: selectedOpsProduct, forecasts: wf, startInv: inv.startInv, finalSS: inv.finalSS, manualReleases: manualBrewPlan[selectedOpsProduct] || {} };
   }, [productLevelRows, selectedOpsProduct, inventoryDB, manualBrewPlan]);
 
-  // --- ACTIONS & AUDITS ---
   const handleGlobalSLChange = (newSL: number) => {
     setGlobalServiceLevel(newSL);
     const z = getZRatio(newSL);
     setInventoryDB(prev => prev.map(item => ({ ...item, finalSS: Number((item.baseSafetyStock * z).toFixed(2)) })));
   };
 
-  // UPGRADED: Starting Inventory now routes straight to the Audit Modal
   const handleInventoryUpdate = (name: string, field: "startInv" | "finalSS", value: string) => {
       setPendingEdit({ context: 'inventory', brand: name, newValue: value, inventoryField: field });
   };
@@ -785,7 +794,14 @@ export default function Home() {
             setRows(prev => prev.map(r => r.id === row.id ? { ...r, effective_value: parsed } : r));
         }
     } else if (pendingEdit.context === 'inventory' && pendingEdit.inventoryField) {
-        // UPGRADED: Handles dynamic saving of both startInv and finalSS
+        if (pendingEdit.inventoryField === 'startInv') {
+            await supabase.from("inventory").update({ startInv: parsed }).eq("name", pendingEdit.brand);
+            await supabase.from("inventory").update({ starting_inventory: parsed }).eq("ProductName", pendingEdit.brand);
+        } else {
+            await supabase.from("inventory").update({ finalSS: parsed, safetyStock: parsed }).eq("name", pendingEdit.brand);
+            await supabase.from("inventory").update({ safety_stock: parsed }).eq("ProductName", pendingEdit.brand);
+        }
+
         setInventoryDB(prev => prev.map(item =>
             item.name === pendingEdit.brand ? { ...item, [pendingEdit.inventoryField!]: parsed } : item
         ));
@@ -802,7 +818,6 @@ export default function Home() {
   }
 
 
-  // --- RENDERERS ---
   function renderOverviewTab() {
     return (
       <div style={{ display: "flex", flexDirection: "column", gap: "20px" }}>
@@ -886,7 +901,7 @@ export default function Home() {
                   disabled={refreshingInventory || !!planWorkflow.inventoryLockedAt}
                   style={{ background: refreshingInventory || planWorkflow.inventoryLockedAt ? "#6b7280" : "#111827", color: "white", border: "none", borderRadius: "12px", padding: "12px 18px", fontWeight: 600, cursor: refreshingInventory ? "wait" : planWorkflow.inventoryLockedAt ? "not-allowed" : "pointer" }}
                 >
-                  {refreshingInventory ? "Refreshing..." : "Refresh Inventory from Tableau"}
+                  {refreshingInventory ? "Refreshing..." : "Refresh Inventory from API"}
                 </button>
                 {!planWorkflow.inventoryLockedAt && (
                   <button
@@ -927,20 +942,19 @@ export default function Home() {
                         <th style={{ textAlign: "center", padding: "14px 16px", borderBottom: "1px solid #e5e7eb", fontSize: "13px", fontWeight: 700, color: "#374151" }}>Starting Inv</th>
                         <th style={{ textAlign: "center", padding: "14px 16px", borderBottom: "1px solid #e5e7eb", fontSize: "13px", fontWeight: 700, color: "#9ca3af" }}>Avg Demand</th>
                         <th style={{ textAlign: "center", padding: "14px 16px", borderBottom: "1px solid #e5e7eb", fontSize: "13px", fontWeight: 700, color: "#2563eb" }}>Calculated SS</th>
-                        <th style={{ textAlign: "center", padding: "14px 16px", borderBottom: "1px solid #e5e7eb", fontSize: "13px", fontWeight: 700, color: "#7e22ce", background: "#f3e8ff" }}>Audited Final SS</th>
+                        <th style={{ textAlign: "center", padding: "14px 16px", borderBottom: "1px solid #e5e7eb", fontSize: "13px", fontWeight: 700, color: "#7e22ce", background: "#f3e8ff" }}>Desired Safety Stock</th>
                     </tr>
                 </thead>
                 <tbody>
                     {enrichedInventoryDB.map((item, index) => {
                         const calcSS = item.baseSafetyStock * getZRatio(globalServiceLevel);
                         const isSSAudited = item.finalSS !== Number(calcSS.toFixed(2));
-                        const isInvAudited = item.startInv !== item.originalStartInv; // Visual check for Starting Inventory overrides
+                        const isInvAudited = item.startInv !== item.originalStartInv;
 
                         return (
                             <tr key={item.name} style={{ background: index % 2 === 0 ? "white" : "#fcfcfd" }}>
                                 <td style={{...cellStyle, fontWeight: 'bold'}}>{item.name}</td>
 
-                                {/* UPGRADED: Starting Inventory is now fully auditable and visually highlights amber when changed */}
                                 <td style={{...cellStyle, textAlign: 'center'}}>
                                     <input
                                         key={`inv-${item.name}-${item.startInv}-${cancelTick}`}
@@ -1023,22 +1037,47 @@ export default function Home() {
       <div style={{ display: "flex", flexDirection: "column", gap: "20px" }}>
 
         <div style={{...chartCardStyle, background: "#111827", color: "white"}}>
-            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "12px" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: "12px" }}>
                 <div>
                     <h2 style={{ margin: 0, fontSize: "22px", fontWeight: 700 }}>Facility Load vs Capacity</h2>
-                    {masterSchedule.hasWarning && <p style={{ color: "#f87171", fontSize: "14px", marginTop: "4px", margin: 0 }}>⚠️ WARNING: Approaching absolute limit of {MAX_CAPACITY} bbls.</p>}
+                    <p style={{ margin: 0, marginTop: "4px", color: "#9ca3af", fontSize: "13px" }}>If capacity exceeds 500 BBL, refer to the color-coded breakdown to prioritize critical restocks.</p>
+                    {masterSchedule.hasWarning && <p style={{ color: "#f87171", fontSize: "14px", marginTop: "8px", margin: 0, fontWeight: "bold" }}>⚠️ WARNING: Approaching absolute limit of {MAX_CAPACITY} bbls.</p>}
                 </div>
                 <span style={{ color: "#a78bfa", fontWeight: 'bold', fontSize: "18px" }}>{MAX_CAPACITY} bbl max</span>
             </div>
 
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(6, 1fr)', gap: '16px', marginTop: '20px' }}>
+            {/* URGENCY LEGEND */}
+            <div style={{ display: 'flex', gap: '16px', marginTop: '12px', marginBottom: '8px', fontSize: '13px', color: '#cbd5e1' }}>
+                <span style={{ display: 'flex', alignItems: 'center', gap: '6px' }}><div style={{ width: '10px', height: '10px', borderRadius: '50%', background: '#f87171' }}/> Critical (Below Safety Stock)</span>
+                <span style={{ display: 'flex', alignItems: 'center', gap: '6px' }}><div style={{ width: '10px', height: '10px', borderRadius: '50%', background: '#fbbf24' }}/> Needs Brew (Below Reorder Point)</span>
+                <span style={{ display: 'flex', alignItems: 'center', gap: '6px' }}><div style={{ width: '10px', height: '10px', borderRadius: '50%', background: '#34d399' }}/> Healthy (Future Restock)</span>
+            </div>
+
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(6, 1fr)', gap: '16px', marginTop: '12px' }}>
                 {masterSchedule.weeklyTotals.map((total, i) => {
                     const isOver = total > WARNING_THRESHOLD;
                     return (
                         <div key={i} style={{ padding: '16px', borderRadius: '12px', background: isOver ? '#450a0a' : '#1e293b', border: isOver ? '1px solid #7f1d1d' : '1px solid #334155', textAlign: 'center' }}>
                             <div style={{ fontSize: '12px', color: '#94a3b8', marginBottom: '8px' }}>{weekLabels[i]}</div>
                             <div style={{ fontSize: '24px', fontWeight: 'black', color: isOver ? '#f87171' : '#34d399' }}>{total}</div>
-                            <div style={{ fontSize: '12px', color: '#64748b', fontWeight: 'bold', marginTop: '4px' }}>{Math.round((total/MAX_CAPACITY)*100)}% Full</div>
+                            <div style={{ fontSize: '12px', color: '#64748b', fontWeight: 'bold', marginTop: '4px', marginBottom: '12px' }}>{Math.round((total/MAX_CAPACITY)*100)}% Full</div>
+
+                            {/* COLOR CODED BREAKDOWN */}
+                            <div style={{ width: '100%', borderTop: '1px solid #475569', paddingTop: '8px', display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                                {Object.entries(masterSchedule.productBreakdown).map(([prod, releases]) => {
+                                    if (releases[i] > 0) {
+                                        const urg = masterSchedule.productUrgency[prod];
+                                        const color = urg === 'RED' ? '#f87171' : urg === 'YELLOW' ? '#fbbf24' : '#34d399';
+                                        return (
+                                            <div key={prod} style={{ display: 'flex', justifyContent: 'space-between', fontSize: '11px', color }}>
+                                                <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', textAlign: 'left' }}>{prod}</span>
+                                                <span style={{ fontWeight: 'bold' }}>{releases[i]}</span>
+                                            </div>
+                                        )
+                                    }
+                                    return null;
+                                })}
+                            </div>
                         </div>
                     )
                 })}
@@ -1157,7 +1196,6 @@ export default function Home() {
     );
   }
 
-  // --- RENDER DEMAND PLAN (SAANIKA'S CODE UNCHANGED) ---
   function renderDemandPlanTab() {
     return (
       <>
