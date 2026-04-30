@@ -44,7 +44,7 @@ type PendingAudit = {
   inventoryField?: "startInv" | "finalSS";
 };
 
-const TABS = ["Overview", "Forecasted Demand", "Inventory", "Brewing Plan", "Packaging Plan - Coming Soon", "Allocation Plan - Coming Soon"] as const;
+const TABS = ["Overview", "Forecasted Demand", "Inventory", "Brewing Plan", "Packaging Plan", "Allocation Plan - Coming Soon"] as const;
 type TabName = (typeof TABS)[number];
 
 // --- HELPER MATH ---
@@ -52,7 +52,7 @@ function getEffectiveOrForecast(row: DemandPlanRow) { return row.effective_value
 function formatNumber(value: number | null | undefined) { return value == null ? "" : Number(value).toFixed(2).replace(/\.00$/, ""); }
 function getZRatio(sl: number) { return sl === 99 ? 2.33 / 1.645 : sl === 90 ? 1.28 / 1.645 : sl === 85 ? 1.04 / 1.645 : 1.0; }
 
-// --- UNIT CONVERSION (BBL → CE) ---
+// --- UNIT CONVERSION (BBL → CE & PHYSICAL UNITS) ---
 const CE_PER_BBL_DEFAULT = 13.78;
 const CE_PER_BBL: Record<string, number> = {
   "Keg - 50L": 5.87 / 0.426,
@@ -77,10 +77,23 @@ const CE_PER_BBL: Record<string, number> = {
   "Case - 24x - 16oz - Can": 1.34 / 0.097,
   "Single - Magnum 1.5 L": 0.18 / 0.013,
 };
+
 function convertBblTo(value: number, packaging: string, unit: "BBL" | "CE"): number {
   if (unit === "BBL") return value;
   const ratio = CE_PER_BBL[packaging] ?? CE_PER_BBL_DEFAULT;
   return value * ratio;
+}
+
+function getBblPerUnit(packaging: string): number {
+  if (packaging.includes("1/2 bbl") || packaging.includes("1/2 BBL") || packaging === "Keg - 50L") return 0.500;
+  if (packaging.includes("1/4 bbl")) return 0.250;
+  if (packaging.includes("1/6 bbl") || packaging.includes("Sixtel") || packaging.includes("20L")) return 0.167;
+  if (packaging.includes("24x - 12oz") || packaging.includes("6x4 - 12oz") || packaging.includes("4x6 - 12oz")) return 0.073;
+  if (packaging.includes("24x - 16oz") || packaging.includes("6x4 - 16oz")) return 0.097;
+  if (packaging.includes("12x - 19.2oz")) return 0.058;
+  if (packaging.includes("12x - 16oz")) return 0.048;
+  if (packaging.includes("12x - 500ml")) return 0.051;
+  return 1;
 }
 
 function getNextMonday(fromDate = new Date()) {
@@ -441,8 +454,6 @@ export default function Home() {
         console.log("External API offline or unavailable. Using Supabase inventory.");
       }
 
-      // --- DYNAMIC SAFETY STOCK ALGORITHM (2-STEP LOOKBACK) ---
-      // 1. Find the absolute latest date in the historical data to serve as "Today" (Week 0)
       let maxTime = 0;
       fetchedHist.forEach((r) => {
         const t = new Date(r.Date).getTime();
@@ -451,14 +462,13 @@ export default function Home() {
       const anchorMs = maxTime > 0 ? maxTime : Date.now();
       const ONE_WEEK_MS = 7 * 24 * 3600 * 1000;
 
-      // 2. Group historical sales into weekly buckets relative to the Anchor Date
       const weeklyHistory: Record<string, Record<number, number>> = {};
       fetchedHist.forEach((r) => {
         const t = new Date(r.Date).getTime();
         if (Number.isNaN(t)) return;
 
         const weeksAgo = Math.floor((anchorMs - t) / ONE_WEEK_MS);
-        if (weeksAgo < 0) return; // Discard anomalies in the future
+        if (weeksAgo < 0) return;
 
         const name = r.ProductName || "Unknown";
         weeklyHistory[name] ||= {};
@@ -473,25 +483,19 @@ export default function Home() {
       }
 
       function baseSSFor(product: string): number {
-        // If user already audited/locked a safety stock in Supabase, preserve it.
         if (ssByProduct[product] !== undefined) return ssByProduct[product];
 
         const buckets = weeklyHistory[product];
-        if (!buckets) return 10; // Fallback if no history exists
+        if (!buckets) return 10;
 
-        // Step 1: Calculate the average weekly demand over the last 13 weeks (3 months)
         let recentTotal = 0;
         for (let i = 0; i < 13; i++) {
             recentTotal += buckets[i] || 0;
         }
         const recentAvg = recentTotal / 13;
-
-        // Step 2: Determine if this is a Core/Popular beer or a Seasonal/Dying beer.
-        // Threshold: 2 BBLs per week average.
         const isLowVolume = recentAvg < 2.0;
-        const lookbackWindow = isLowVolume ? 13 : 52; // 3 months vs 12 months
+        const lookbackWindow = isLowVolume ? 13 : 52;
 
-        // Step 3: Extract the exact window of data, padding with 0s for weeks with no sales
         const valuesWindow: number[] = [];
         for (let i = 0; i < lookbackWindow; i++) {
             valuesWindow.push(buckets[i] || 0);
@@ -753,6 +757,18 @@ export default function Home() {
     const inv = inventoryDB.find(i => i.name === selectedOpsProduct) || { startInv: 0, finalSS: 10 };
     return { name: selectedOpsProduct, forecasts: wf, startInv: inv.startInv, finalSS: inv.finalSS, manualReleases: manualBrewPlan[selectedOpsProduct] || {} };
   }, [productLevelRows, selectedOpsProduct, inventoryDB, manualBrewPlan]);
+
+  // MOVED OUT OF RENDER HELPER TO OBEY RULES OF HOOKS
+  const brandPackagingRows = useMemo(() => {
+    const grouped: Record<string, PivotRow> = {};
+    rows.filter(r => r.brand === selectedOpsProduct && r.packaging_format !== "ALL").forEach(r => {
+        const key = `${r.brand}||${r.channel}||${r.packaging_format}`;
+        if (!grouped[key]) grouped[key] = { key, brand: r.brand, channel: r.channel, packaging_format: r.packaging_format, Week1: null, Week2: null, Week3: null, Week4: null, Week5: null, Week6: null, Week7: null, Week8: null };
+        if (r.week_number >= 1 && r.week_number <= 8) grouped[key][`Week${r.week_number}` as keyof PivotRow] = getEffectiveOrForecast(r) as never;
+    });
+    return Object.values(grouped).sort((a, b) => a.packaging_format.localeCompare(b.packaging_format));
+  }, [rows, selectedOpsProduct]);
+
 
   const handleGlobalSLChange = (newSL: number) => {
     setGlobalServiceLevel(newSL);
@@ -1229,7 +1245,106 @@ export default function Home() {
     );
   }
 
-  // --- RENDER DEMAND PLAN (SAANIKA'S CODE UNCHANGED) ---
+  function renderPackagingTab() {
+    if (!opsProductData || !masterSchedule) return null;
+
+    const brewingPlan = generateCapacityPlan(opsProductData.name, opsProductData.forecasts, opsProductData.startInv, opsProductData.finalSS, opsProductData.manualReleases);
+
+    return (
+      <div style={{ display: "flex", flexDirection: "column", gap: "20px" }}>
+        <div style={chartCardStyle}>
+            <h2 style={{ margin: 0, fontSize: "28px", fontWeight: 700 }}>Packaging Plan</h2>
+            <p style={{ marginTop: "8px", marginBottom: 0, color: "#6b7280" }}>Translate liquid inventory into physical SKU work orders.</p>
+        </div>
+
+        <div style={filterCardStyle}>
+            <label style={labelStyle}>Select Brand to Package</label>
+            <select value={selectedOpsProduct} onChange={(e) => setSelectedOpsProduct(e.target.value)} style={selectStyle}>
+                {products.map(p => <option key={p} value={p}>{p}</option>)}
+            </select>
+        </div>
+
+        <div style={tableCardStyle}>
+            <div style={{ padding: "24px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <div>
+                    <h3 style={{ margin: 0, fontSize: "20px", fontWeight: 700 }}>{opsProductData.name} - Packaging Schedule</h3>
+                    <p style={{ margin: 0, marginTop: "4px", color: "#6b7280", fontSize: "13px" }}>Physical units required to meet forecasted demand.</p>
+                </div>
+            </div>
+
+            <div style={{ overflowX: "auto" }}>
+                <table style={{ width: "100%", minWidth: "900px", borderCollapse: "collapse" }}>
+                    <thead>
+                        <tr style={{ background: "#f8fafc" }}>
+                            <th style={{ textAlign: "left", padding: "14px 16px", borderBottom: "1px solid #e5e7eb", fontSize: "13px" }}>Format</th>
+                            {weekLabels.slice(0,6).map(lbl => <th key={lbl} style={{ textAlign: "center", padding: "14px 16px", borderBottom: "1px solid #e5e7eb", fontSize: "13px", color: '#2563eb' }}>{lbl}</th>)}
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {/* THE LIQUID CHECK (CONSTRAINT) */}
+                        <tr style={{ background: '#fef3c7', borderBottom: '2px solid #f59e0b' }}>
+                            <td style={{...cellStyle, fontWeight: '900', color: '#92400e'}}>💧 Liquid Available to Package</td>
+                            {brewingPlan.projAvailable.map((bbl, i) => (
+                                <td key={i} style={{...cellStyle, textAlign: 'center', fontWeight: 'bold', color: '#92400e'}}>
+                                    {formatNumber(bbl)} BBL
+                                </td>
+                            ))}
+                        </tr>
+
+                        {/* THE PACKAGING ROWS */}
+                        {brandPackagingRows.map((row, idx) => {
+                            const bblPerUnit = getBblPerUnit(row.packaging_format);
+                            return (
+                                <tr key={row.key} style={{ background: idx % 2 === 0 ? "white" : "#fcfcfd", borderBottom: '1px solid #f1f5f9' }}>
+                                    <td style={{...cellStyle, fontWeight: 'bold', color: '#4b5563'}}>
+                                        {row.packaging_format}
+                                        <div style={{ fontSize: '11px', color: '#9ca3af', fontWeight: 'normal' }}>{bblPerUnit} BBL / unit</div>
+                                    </td>
+                                    {[1, 2, 3, 4, 5, 6].map((w) => {
+                                        const bblDemand = Number(row[`Week${w}` as keyof PivotRow] || 0);
+                                        const physicalUnits = Math.ceil(bblDemand / bblPerUnit);
+
+                                        return (
+                                            <td key={w} style={{...cellStyle, textAlign: 'center'}}>
+                                                {physicalUnits > 0 ? (
+                                                    <div>
+                                                        <div style={{ fontWeight: 'bold', fontSize: '15px', color: '#111827' }}>{physicalUnits} units</div>
+                                                        <div style={{ fontSize: '12px', color: '#64748b' }}>({formatNumber(bblDemand)} BBL)</div>
+                                                    </div>
+                                                ) : (
+                                                    <span style={{ color: '#cbd5e1' }}>-</span>
+                                                )}
+                                            </td>
+                                        )
+                                    })}
+                                </tr>
+                            )
+                        })}
+
+                        {/* TOTAL LIQUID REQUIRED VS AVAILABLE WARNING */}
+                        <tr style={{ background: '#f8fafc', borderTop: '2px solid #e5e7eb' }}>
+                            <td style={{...cellStyle, fontWeight: 'bold', color: '#111827'}}>⚠️ Liquid Balance Check</td>
+                            {[1, 2, 3, 4, 5, 6].map((w, i) => {
+                                let totalBblNeeded = 0;
+                                brandPackagingRows.forEach(r => { totalBblNeeded += Number(r[`Week${w}` as keyof PivotRow] || 0); });
+                                const liquidAvailable = brewingPlan.projAvailable[i];
+                                const isShort = totalBblNeeded > liquidAvailable;
+
+                                return (
+                                    <td key={w} style={{...cellStyle, textAlign: 'center', fontWeight: 'bold', color: isShort ? '#ef4444' : '#10b981'}}>
+                                        {isShort ? `Short by ${formatNumber(totalBblNeeded - liquidAvailable)} BBL` : `OK (+${formatNumber(liquidAvailable - totalBblNeeded)} BBL)`}
+                                    </td>
+                                )
+                            })}
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+      </div>
+    );
+  }
+
   function renderDemandPlanTab() {
     return (
       <>
@@ -1559,7 +1674,8 @@ export default function Home() {
             {activeTab === "Forecasted Demand" && renderDemandPlanTab()}
             {activeTab === "Inventory" && renderInventoryTab()}
             {activeTab === "Brewing Plan" && renderBrewingTab()}
-            {(activeTab === "Packaging Plan - Coming Soon" || activeTab === "Allocation Plan - Coming Soon") && <div style={chartCardStyle}><h2>{activeTab}</h2><p>Coming Soon</p></div>}
+            {activeTab === "Packaging Plan" && renderPackagingTab()}
+            {activeTab === "Allocation Plan - Coming Soon" && <div style={chartCardStyle}><h2>{activeTab}</h2><p>Coming Soon</p></div>}
           </>
         )}
       </div>
