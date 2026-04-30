@@ -1,0 +1,74 @@
+<html>
+<head>
+<title>capacityPlanning.ts</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cf8e6d;}
+.s1 { color: #bcbec4;}
+.s2 { color: #56a8f5;}
+.s3 { color: #bcbec4;}
+.s4 { color: #2aacb8; font-style: italic;}
+.s5 { color: #c77dbb; font-style: italic;}
+</style>
+</head>
+<body bgcolor="#191a1c">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+capacityPlanning.ts</font>
+</center></td></tr></table>
+<pre><span class="s0">export function </span><span class="s2">generateCapacityPlan</span><span class="s3">(name: string, forecasts: number</span><span class="s1">[]</span><span class="s3">, startInv: number, safetyStock: number, manualReleases: Record&lt;number, number&gt; = {}) {</span>
+    <span class="s0">let </span><span class="s3">projAvailable = </span><span class="s1">[]</span><span class="s3">;</span>
+    <span class="s0">let </span><span class="s3">plannedReceipt = </span><span class="s1">[]</span><span class="s3">;</span>
+    <span class="s0">let </span><span class="s3">plannedRelease = </span><span class="s1">[]</span><span class="s3">;</span>
+
+    <span class="s0">let </span><span class="s3">currentInv = startInv;</span>
+    <span class="s0">const </span><span class="s3">batchSize = </span><span class="s4">50</span><span class="s3">;</span>
+    <span class="s0">const </span><span class="s3">leadTime = </span><span class="s4">2</span><span class="s3">;</span>
+
+    <span class="s0">for </span><span class="s1">(</span><span class="s0">let </span><span class="s3">i = </span><span class="s4">0</span><span class="s3">; i &lt; </span><span class="s4">8</span><span class="s3">; i++</span><span class="s1">) </span><span class="s3">{</span>
+        <span class="s0">let </span><span class="s3">demand = forecasts</span><span class="s1">[</span><span class="s3">i</span><span class="s1">] </span><span class="s3">|| </span><span class="s4">0</span><span class="s3">;</span>
+        <span class="s0">let </span><span class="s3">projectedInv = currentInv - demand;</span>
+        <span class="s0">let </span><span class="s3">receipt = </span><span class="s4">0</span><span class="s3">;</span>
+
+        <span class="s0">let </span><span class="s3">isManual = manualReleases</span><span class="s1">[</span><span class="s3">i - leadTime</span><span class="s1">] </span><span class="s3">!== </span><span class="s5">undefined</span><span class="s3">;</span>
+
+        <span class="s0">if </span><span class="s1">(</span><span class="s3">isManual</span><span class="s1">) </span><span class="s3">{</span>
+            <span class="s3">receipt = manualReleases</span><span class="s1">[</span><span class="s3">i - leadTime</span><span class="s1">]</span><span class="s3">;</span>
+        <span class="s3">} </span><span class="s0">else </span><span class="s3">{</span>
+            <span class="s0">if </span><span class="s1">(</span><span class="s3">projectedInv &lt; safetyStock</span><span class="s1">) </span><span class="s3">{</span>
+                <span class="s0">let </span><span class="s3">gap = safetyStock - projectedInv;</span>
+                <span class="s3">receipt = Math.</span><span class="s2">ceil</span><span class="s1">(</span><span class="s3">gap / batchSize</span><span class="s1">) </span><span class="s3">* batchSize;</span>
+            <span class="s3">}</span>
+        <span class="s3">}</span>
+
+        <span class="s3">plannedReceipt.</span><span class="s2">push</span><span class="s1">(</span><span class="s3">receipt</span><span class="s1">)</span><span class="s3">;</span>
+        <span class="s3">currentInv = projectedInv + receipt;</span>
+        <span class="s3">projAvailable.</span><span class="s2">push</span><span class="s1">(</span><span class="s3">currentInv</span><span class="s1">)</span><span class="s3">;</span>
+    <span class="s3">}</span>
+
+    <span class="s0">for </span><span class="s1">(</span><span class="s0">let </span><span class="s3">i = </span><span class="s4">0</span><span class="s3">; i &lt; </span><span class="s4">6</span><span class="s3">; i++</span><span class="s1">) </span><span class="s3">{</span>
+        <span class="s3">plannedRelease.</span><span class="s2">push</span><span class="s1">(</span><span class="s3">manualReleases</span><span class="s1">[</span><span class="s3">i</span><span class="s1">] </span><span class="s3">!== </span><span class="s5">undefined </span><span class="s3">? manualReleases</span><span class="s1">[</span><span class="s3">i</span><span class="s1">] </span><span class="s3">: </span><span class="s1">(</span><span class="s3">plannedReceipt</span><span class="s1">[</span><span class="s3">i + leadTime</span><span class="s1">] </span><span class="s3">|| </span><span class="s4">0</span><span class="s1">))</span><span class="s3">;</span>
+    <span class="s3">}</span>
+
+    <span class="s0">const </span><span class="s3">displayForecasts = forecasts.</span><span class="s2">slice</span><span class="s1">(</span><span class="s4">0</span><span class="s3">, </span><span class="s4">6</span><span class="s1">)</span><span class="s3">;</span>
+    <span class="s0">const </span><span class="s3">displayAvailable = projAvailable.</span><span class="s2">slice</span><span class="s1">(</span><span class="s4">0</span><span class="s3">, </span><span class="s4">6</span><span class="s1">)</span><span class="s3">;</span>
+    <span class="s0">const </span><span class="s3">displayReceipts = plannedReceipt.</span><span class="s2">slice</span><span class="s1">(</span><span class="s4">0</span><span class="s3">, </span><span class="s4">6</span><span class="s1">)</span><span class="s3">;</span>
+
+    <span class="s0">const </span><span class="s3">totalForecast = displayForecasts.</span><span class="s2">reduce</span><span class="s1">(</span><span class="s3">(a, b) </span><span class="s0">=&gt; </span><span class="s3">a + b, </span><span class="s4">0</span><span class="s1">)</span><span class="s3">;</span>
+    <span class="s0">const </span><span class="s3">avgWeeklyDemand = totalForecast / </span><span class="s4">6</span><span class="s3">;</span>
+
+    <span class="s0">return </span><span class="s3">{</span>
+        <span class="s1">productName</span><span class="s3">: name,</span>
+        <span class="s3">totalForecast,</span>
+        <span class="s3">avgWeeklyDemand,</span>
+        <span class="s3">startInv,</span>
+        <span class="s3">safetyStock,</span>
+        <span class="s1">forecasts</span><span class="s3">: displayForecasts,</span>
+        <span class="s1">projAvailable</span><span class="s3">: displayAvailable,</span>
+        <span class="s1">plannedReceipt</span><span class="s3">: displayReceipts,</span>
+        <span class="s3">plannedRelease</span>
+    <span class="s3">};</span>
+<span class="s3">}</span></pre>
+</body>
+</html>

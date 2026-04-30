@@ -441,17 +441,28 @@ export default function Home() {
         console.log("External API offline or unavailable. Using Supabase inventory.");
       }
 
-      const weeklyByProduct: Record<string, Record<string, number>> = {};
+      // --- DYNAMIC SAFETY STOCK ALGORITHM (2-STEP LOOKBACK) ---
+      // 1. Find the absolute latest date in the historical data to serve as "Today" (Week 0)
+      let maxTime = 0;
       fetchedHist.forEach((r) => {
-        const d = new Date(r.Date);
-        if (Number.isNaN(d.getTime())) return;
-        const year = d.getUTCFullYear();
-        const start = Date.UTC(year, 0, 1);
-        const week = Math.floor((d.getTime() - start) / (7 * 24 * 3600 * 1000)) + 1;
-        const bucket = `${year}-${week}`;
+        const t = new Date(r.Date).getTime();
+        if (!Number.isNaN(t) && t > maxTime) maxTime = t;
+      });
+      const anchorMs = maxTime > 0 ? maxTime : Date.now();
+      const ONE_WEEK_MS = 7 * 24 * 3600 * 1000;
+
+      // 2. Group historical sales into weekly buckets relative to the Anchor Date
+      const weeklyHistory: Record<string, Record<number, number>> = {};
+      fetchedHist.forEach((r) => {
+        const t = new Date(r.Date).getTime();
+        if (Number.isNaN(t)) return;
+
+        const weeksAgo = Math.floor((anchorMs - t) / ONE_WEEK_MS);
+        if (weeksAgo < 0) return; // Discard anomalies in the future
+
         const name = r.ProductName || "Unknown";
-        weeklyByProduct[name] ||= {};
-        weeklyByProduct[name][bucket] = (weeklyByProduct[name][bucket] || 0) + (Number(r["Sales Vol"]) || 0);
+        weeklyHistory[name] ||= {};
+        weeklyHistory[name][weeksAgo] = (weeklyHistory[name][weeksAgo] || 0) + (Number(r["Sales Vol"]) || 0);
       });
 
       function stdDev(values: number[]): number {
@@ -462,11 +473,31 @@ export default function Home() {
       }
 
       function baseSSFor(product: string): number {
+        // If user already audited/locked a safety stock in Supabase, preserve it.
         if (ssByProduct[product] !== undefined) return ssByProduct[product];
-        const buckets = weeklyByProduct[product];
-        if (!buckets) return 10;
-        const vals = Object.values(buckets);
-        const sigma = stdDev(vals);
+
+        const buckets = weeklyHistory[product];
+        if (!buckets) return 10; // Fallback if no history exists
+
+        // Step 1: Calculate the average weekly demand over the last 13 weeks (3 months)
+        let recentTotal = 0;
+        for (let i = 0; i < 13; i++) {
+            recentTotal += buckets[i] || 0;
+        }
+        const recentAvg = recentTotal / 13;
+
+        // Step 2: Determine if this is a Core/Popular beer or a Seasonal/Dying beer.
+        // Threshold: 2 BBLs per week average.
+        const isLowVolume = recentAvg < 2.0;
+        const lookbackWindow = isLowVolume ? 13 : 52; // 3 months vs 12 months
+
+        // Step 3: Extract the exact window of data, padding with 0s for weeks with no sales
+        const valuesWindow: number[] = [];
+        for (let i = 0; i < lookbackWindow; i++) {
+            valuesWindow.push(buckets[i] || 0);
+        }
+
+        const sigma = stdDev(valuesWindow);
         return Number(sigma.toFixed(2)) || 10;
       }
 
@@ -1128,16 +1159,18 @@ export default function Home() {
                 <h3 style={{ margin: 0, fontSize: "20px" }}>{opsProductData.name} - Action Plan</h3>
                 <span style={{ fontSize: '18px', fontWeight: 'bold', color: '#7e22ce' }}>Locked SS: {formatNumber(opsProductData.finalSS)}</span>
             </div>
+
             {(() => {
-              const plan = generateCapacityPlan(opsProductData.name, opsProductData.forecasts, opsProductData.startInv, opsProductData.finalSS, opsProductData.manualReleases);
-              const lateReceipts = plan.plannedReceipt.slice(0, 2).map((r, i) => r > 0 ? { week: i, amount: r } : null).filter((x): x is { week: number; amount: number } => x !== null);
-              if (lateReceipts.length === 0) return null;
-              return (
-                <div style={{ margin: "0 24px 16px 24px", padding: "12px 16px", background: "#fef3c7", border: "1px solid #f59e0b", borderRadius: "12px", color: "#92400e", fontSize: "13px", fontWeight: 600 }}>
-                  Behind schedule: {lateReceipts.map(r => `${formatNumber(r.amount)} BBL needs to arrive in ${weekLabels[r.week]}`).join(" and ")}. This brew should have started {lateReceipts[0].week === 0 ? "2 weeks ago" : "1 week ago"} — confirm it's already in the tank, or start immediately.
-                </div>
-              );
+              if (opsProductData.startInv < opsProductData.finalSS) {
+                return (
+                  <div style={{ margin: "0 24px 16px 24px", padding: "12px 16px", background: "#fef3c7", border: "1px solid #f59e0b", borderRadius: "12px", color: "#92400e", fontSize: "13px", fontWeight: 600 }}>
+                    Notice: Current inventory is below the desired safety stock. Expedited brews have been automatically scheduled for immediate release (Wk 0).
+                  </div>
+                );
+              }
+              return null;
             })()}
+
             <div style={{ overflowX: "auto" }}>
                 <table style={{ width: "100%", minWidth: "900px", borderCollapse: "collapse" }}>
                     <thead>
@@ -1196,6 +1229,7 @@ export default function Home() {
     );
   }
 
+  // --- RENDER DEMAND PLAN (SAANIKA'S CODE UNCHANGED) ---
   function renderDemandPlanTab() {
     return (
       <>
@@ -1354,10 +1388,8 @@ export default function Home() {
                                         if (e.target.value === "") return;
                                         const enteredDisplay = Number(e.target.value);
                                         if (!Number.isFinite(enteredDisplay)) return;
-                                        // Convert displayed unit back to BBL for storage
                                         const enteredBbl = unitMode === "CE" ? enteredDisplay / ratio : enteredDisplay;
                                         const currentBbl = rawBbl == null || rawBbl === "" ? null : Number(rawBbl);
-                                        // Compare in BBL space with a tiny tolerance to avoid float noise
                                         if (currentBbl != null && Math.abs(enteredBbl - currentBbl) < 1e-6) return;
                                         setPendingEdit({ context: 'demand', demandPivotRow: row, weekNumber: w, newValue: String(enteredBbl), brand: row.brand })
                                     }}
