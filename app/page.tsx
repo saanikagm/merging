@@ -1,8 +1,15 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "@/lib/supabase";
 import { generateCapacityPlan } from './capacityPlanning';
+import { generateBrewPlan, type BrewPlanningResult, type ServiceLevel } from "./brewPlanningService";
+import {
+  buildHistoricalDemandByProduct,
+  buildServiceLevelByProduct,
+  buildWipByProduct,
+  mapProductLevelForecasts,
+} from "./revisedBrewPlanMapper";
 import {
   LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Legend,
 } from "recharts";
@@ -35,6 +42,9 @@ type InventoryRow = {
   name: string; startInv: number; originalStartInv: number; baseSafetyStock: number; finalSS: number;
 };
 
+type RevisedInventoryDraft = Record<string, { startInv: string; finalSS: string }>;
+type RevisedServiceLevel = ServiceLevel;
+
 type PackagingInventoryRow = {
   brand: string;
   packaging_format: string;
@@ -50,13 +60,28 @@ type PendingAudit = {
   inventoryField?: "startInv" | "finalSS";
 };
 
-const TABS = ["Overview", "Forecasted Demand", "Inventory", "Brewing Plan", "Packaging Plan", "Allocation Plan - Coming Soon"] as const;
+const TABS = ["Overview", "Forecasted Demand", "Inventory", "Revised Inventory Plan", "Brewing Plan", "Revised Brewing Plan", "Packaging Plan"] as const;
 type TabName = (typeof TABS)[number];
 
 // --- HELPER MATH ---
 function getEffectiveOrForecast(row: DemandPlanRow) { return row.effective_value ?? row.previous_value ?? 0; }
 function formatNumber(value: number | null | undefined) { return value == null ? "" : Number(value).toFixed(2).replace(/\.00$/, ""); }
 function getZRatio(sl: number) { return sl === 99 ? 2.33 / 1.645 : sl === 90 ? 1.28 / 1.645 : sl === 85 ? 1.04 / 1.645 : 1.0; }
+const REVISED_SERVICE_LEVELS: RevisedServiceLevel[] = [90, 95, 96, 99, 99.9];
+const REVISED_SAFETY_FACTORS: Record<RevisedServiceLevel, number> = { 90: 1.28, 95: 1.65, 96: 1.75, 99: 2.33, 99.9: 4.00 };
+const LONG_LOOKBACK_PRODUCTS = ["the pupil", "pupil", "bulbous flowers"];
+
+function stdDev(values: number[]): number {
+  if (values.length < 2) return 0;
+  const mean = values.reduce((s, v) => s + v, 0) / values.length;
+  const variance = values.reduce((s, v) => s + (v - mean) ** 2, 0) / (values.length - 1);
+  return Math.sqrt(variance);
+}
+
+function usesLongSafetyStockLookback(product: string): boolean {
+  const normalized = product.trim().toLowerCase();
+  return LONG_LOOKBACK_PRODUCTS.some((name) => normalized === name || normalized.includes(name));
+}
 
 // --- UNIT CONVERSION (BBL → CE & PHYSICAL UNITS) ---
 const CE_PER_BBL_DEFAULT = 13.78;
@@ -260,10 +285,13 @@ export default function Home() {
   }
 
   const [refreshingInventory, setRefreshingInventory] = useState(false);
+  const [inventoryLastRefreshedAt, setInventoryLastRefreshedAt] = useState<string | null>(null);
+  const [inventoryRefreshError, setInventoryRefreshError] = useState("");
 
   async function refreshInventoryFromTableau() {
     if (refreshingInventory) return;
     setRefreshingInventory(true);
+    setInventoryRefreshError("");
     try {
       const apiUrl = process.env.NEXT_PUBLIC_FORECAST_API_URL || "http://localhost:8000";
       const apiKey = process.env.NEXT_PUBLIC_FORECAST_API_KEY || "";
@@ -304,8 +332,10 @@ export default function Home() {
         ...item,
         startInv: Number(item.startInv.toFixed(2)),
       })).sort((a, b) => a.brand.localeCompare(b.brand) || a.packaging_format.localeCompare(b.packaging_format)));
+      setInventoryLastRefreshedAt(new Date().toISOString());
     } catch (e) {
       console.error("Inventory refresh failed:", e);
+      setInventoryRefreshError(e instanceof Error ? e.message : "Inventory refresh failed.");
       alert("Failed to refresh inventory from Tableau. See console for details.");
     } finally {
       setRefreshingInventory(false);
@@ -371,6 +401,31 @@ export default function Home() {
   const [globalServiceLevel, setGlobalServiceLevel] = useState(95);
   const [selectedOpsProduct, setSelectedOpsProduct] = useState("");
   const [manualBrewPlan, setManualBrewPlan] = useState<Record<string, Record<number, number>>>({});
+  const [revisedInventoryDraft, setRevisedInventoryDraft] = useState<RevisedInventoryDraft>({});
+  const [revisedPortfolioServiceLevel, setRevisedPortfolioServiceLevel] = useState<RevisedServiceLevel>(95);
+  const [revisedSelectedProduct, setRevisedSelectedProduct] = useState("");
+  const [revisedSelectedWeek, setRevisedSelectedWeek] = useState("");
+  const [revisedPlanningHorizonWeeks, setRevisedPlanningHorizonWeeks] = useState(8);
+  const [currentRevisedBrewPlan, setCurrentRevisedBrewPlan] = useState<BrewPlanningResult | null>(null);
+  const CURRENT_REVISED_BREW_PLAN_KEY = "currentRevisedBrewPlan";
+
+  useEffect(() => {
+    try {
+      const currentRaw = localStorage.getItem(CURRENT_REVISED_BREW_PLAN_KEY);
+      if (currentRaw) setCurrentRevisedBrewPlan(JSON.parse(currentRaw) as BrewPlanningResult);
+    } catch (err) {
+      console.warn("Failed to load revised brew plan history:", err);
+    }
+  }, []);
+
+  useEffect(() => {
+    try {
+      if (currentRevisedBrewPlan) localStorage.setItem(CURRENT_REVISED_BREW_PLAN_KEY, JSON.stringify(currentRevisedBrewPlan));
+      else localStorage.removeItem(CURRENT_REVISED_BREW_PLAN_KEY);
+    } catch (err) {
+      console.warn("Failed to store current revised brew plan:", err);
+    }
+  }, [currentRevisedBrewPlan]);
 
   // Universal Audit State
   const [pendingEdit, setPendingEdit] = useState<PendingAudit | null>(null);
@@ -577,13 +632,6 @@ export default function Home() {
         weeklyHistory[name] ||= {};
         weeklyHistory[name][weeksAgo] = (weeklyHistory[name][weeksAgo] || 0) + (Number(r["Sales Vol"]) || 0);
       });
-
-      function stdDev(values: number[]): number {
-        if (values.length < 2) return 0;
-        const mean = values.reduce((s, v) => s + v, 0) / values.length;
-        const variance = values.reduce((s, v) => s + (v - mean) ** 2, 0) / (values.length - 1);
-        return Math.sqrt(variance);
-      }
 
       function baseSSFor(product: string): number {
         if (ssByProduct[product] !== undefined) return ssByProduct[product];
@@ -821,8 +869,150 @@ export default function Home() {
     });
   }, [productLevelRows, inventoryDB]);
 
+  const revisedWipByProduct = useMemo(() => buildWipByProduct(packagingInventoryDB), [packagingInventoryDB]);
+
+  const getDefaultRevisedStartingInventory = useCallback((name: string): number => {
+    const source = inventoryDB.find((item) => item.name === name);
+    const totalInventory = source?.startInv ?? 0;
+    const wipInventory = revisedWipByProduct[name] ?? 0;
+    return Math.max(0, Number((totalInventory - wipInventory).toFixed(2)));
+  }, [inventoryDB, revisedWipByProduct]);
+
+  const revisedSafetyStatsByProduct = useMemo(() => {
+    let maxTime = 0;
+    historicalRows.forEach((r) => {
+      const t = new Date(r.Date).getTime();
+      if (!Number.isNaN(t) && t > maxTime) maxTime = t;
+    });
+    const anchorMs = maxTime > 0 ? maxTime : Date.now();
+    const oneWeekMs = 7 * 24 * 3600 * 1000;
+    const weeklyHistory: Record<string, Record<number, number>> = {};
+
+    historicalRows.forEach((r) => {
+      const t = new Date(r.Date).getTime();
+      if (Number.isNaN(t)) return;
+      const weeksAgo = Math.floor((anchorMs - t) / oneWeekMs);
+      if (weeksAgo < 0) return;
+      const name = r.ProductName || "Unknown";
+      weeklyHistory[name] ||= {};
+      weeklyHistory[name][weeksAgo] = (weeklyHistory[name][weeksAgo] || 0) + (Number(r["Sales Vol"]) || 0);
+    });
+
+    const stats: Record<string, { lookbackWeeks: number; stdDev: number }> = {};
+    products.forEach((product) => {
+      const lookbackWeeks = usesLongSafetyStockLookback(product) ? 52 : 13;
+      const buckets = weeklyHistory[product] || {};
+      const values = Array.from({ length: lookbackWeeks }, (_, i) => buckets[i] || 0);
+      stats[product] = { lookbackWeeks, stdDev: stdDev(values) };
+    });
+    return stats;
+  }, [historicalRows, products]);
+
+  useEffect(() => {
+    if (!revisedSelectedProduct && products.length > 0) setRevisedSelectedProduct(products[0]);
+  }, [products, revisedSelectedProduct]);
+
+  function getCalculatedRevisedSafetyStock(name: string): number {
+    const sigma = revisedSafetyStatsByProduct[name]?.stdDev ?? 0;
+    return Number((sigma * REVISED_SAFETY_FACTORS[revisedPortfolioServiceLevel]).toFixed(2));
+  }
+
+  const getRevisedInventoryValue = useCallback((name: string, field: "startInv" | "finalSS"): number => {
+    const draftValue = revisedInventoryDraft[name]?.[field];
+    if (draftValue !== undefined && draftValue !== "") {
+      const parsed = Number(draftValue);
+      if (Number.isFinite(parsed)) return parsed;
+    }
+    if (field === "finalSS") {
+      const sigma = revisedSafetyStatsByProduct[name]?.stdDev ?? 0;
+      return Number((sigma * REVISED_SAFETY_FACTORS[revisedPortfolioServiceLevel]).toFixed(2));
+    }
+    return getDefaultRevisedStartingInventory(name);
+  }, [revisedInventoryDraft, revisedSafetyStatsByProduct, revisedPortfolioServiceLevel, getDefaultRevisedStartingInventory]);
+
+  function updateRevisedInventoryDraft(name: string, field: "startInv" | "finalSS", value: string) {
+    setRevisedInventoryDraft((prev) => ({
+      ...prev,
+      [name]: {
+        startInv: prev[name]?.startInv ?? String(getDefaultRevisedStartingInventory(name)),
+        finalSS: prev[name]?.finalSS ?? String(inventoryDB.find((item) => item.name === name)?.finalSS ?? 10),
+        [field]: value,
+      },
+    }));
+  }
+
+  function updateRevisedPortfolioServiceLevel(serviceLevel: RevisedServiceLevel) {
+    setRevisedPortfolioServiceLevel(serviceLevel);
+    setRevisedInventoryDraft((prev) => {
+      const next: RevisedInventoryDraft = {};
+      inventoryDB.forEach((item) => {
+        const sigma = revisedSafetyStatsByProduct[item.name]?.stdDev ?? 0;
+        const safetyStock = Number((sigma * REVISED_SAFETY_FACTORS[serviceLevel]).toFixed(2));
+        next[item.name] = {
+          startInv: prev[item.name]?.startInv ?? String(getDefaultRevisedStartingInventory(item.name)),
+          finalSS: String(safetyStock),
+        };
+      });
+      return next;
+    });
+  }
+
+  async function refreshRevisedInventoryFromTableau() {
+    await refreshInventoryFromTableau();
+    setRevisedInventoryDraft({});
+  }
+
   const MAX_CAPACITY = 500;
   const WARNING_THRESHOLD = 400;
+
+  const buildRevisedBrewPlanningInput = useCallback((planningHorizonWeeks: number) => {
+    const productForecasts = mapProductLevelForecasts(rows, weekLabels, planningHorizonWeeks);
+    const productIds = productForecasts.map((forecast) => forecast.product_id);
+    const currentInventoryByProduct = Object.fromEntries(productIds.map((product) => [
+      product,
+      getRevisedInventoryValue(product, "startInv"),
+    ]));
+    const scheduledReceiptsByProduct = Object.fromEntries(productIds.map((product) => [
+      product,
+      [revisedWipByProduct[product] ?? 0, ...Array(Math.max(0, planningHorizonWeeks - 1)).fill(0)],
+    ]));
+
+    return {
+      forecastCycleId: sessionId || "draft-cycle",
+      planningHorizonWeeks,
+      serviceLevelByProduct: buildServiceLevelByProduct(productIds, revisedPortfolioServiceLevel),
+      currentInventoryByProduct,
+      historicalDemandByProduct: buildHistoricalDemandByProduct(historicalRows, productIds),
+      scheduledReceiptsByProduct,
+      brewLeadTimeWeeks: 2,
+      batchSizeBarrels: 50,
+      targetCapacityBarrels: WARNING_THRESHOLD,
+      maxCapacityBarrels: MAX_CAPACITY,
+      productForecasts,
+    };
+  }, [rows, weekLabels, sessionId, getRevisedInventoryValue, revisedPortfolioServiceLevel, historicalRows, revisedWipByProduct]);
+
+  const revisedBrewPlanningInput = useMemo(
+    () => buildRevisedBrewPlanningInput(revisedPlanningHorizonWeeks),
+    [buildRevisedBrewPlanningInput, revisedPlanningHorizonWeeks]
+  );
+
+  function generateRevisedBrewPlan() {
+    const nextPlan = generateBrewPlan({
+      ...revisedBrewPlanningInput,
+      generatedAt: new Date().toISOString(),
+    });
+    setCurrentRevisedBrewPlan(nextPlan);
+  }
+
+  function updateRevisedPlanningHorizonWeeks(nextWeeks: number) {
+    setRevisedPlanningHorizonWeeks(nextWeeks);
+    if (!currentRevisedBrewPlan) return;
+    setCurrentRevisedBrewPlan(generateBrewPlan({
+      ...buildRevisedBrewPlanningInput(nextWeeks),
+      generatedAt: new Date().toISOString(),
+    }));
+  }
 
   const masterSchedule = useMemo(() => {
       const weeklyTotals = [0,0,0,0,0,0];
@@ -1292,6 +1482,388 @@ export default function Home() {
                 </button>
               </div>
             </div>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  function renderRevisedInventoryTab() {
+    return (
+      <div style={{ display: "flex", flexDirection: "column", gap: "20px" }}>
+        <div style={chartCardStyle}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: "16px", flexWrap: "wrap" }}>
+            <div>
+              <h2 style={{ margin: 0, fontSize: "28px", fontWeight: 700 }}>Revised Inventory Plan</h2>
+              <p style={{ marginTop: "8px", marginBottom: 0, color: "#6b7280" }}>
+                Scratchpad for redesigning inventory logic. Refresh pulls current Tableau inventory; draft edits stay local and do not update Tableau, Supabase, or the current Inventory tab.
+              </p>
+            </div>
+            <div style={{ display: "flex", gap: "12px", flexWrap: "wrap", justifyContent: "flex-end" }}>
+              <button
+                onClick={refreshRevisedInventoryFromTableau}
+                disabled={refreshingInventory}
+                style={{ background: refreshingInventory ? "#6b7280" : "#111827", color: "white", border: "none", borderRadius: "12px", padding: "10px 16px", fontWeight: 600, cursor: refreshingInventory ? "wait" : "pointer" }}
+              >
+                {refreshingInventory ? "Refreshing..." : "Refresh from Tableau"}
+              </button>
+              <button
+                onClick={() => { setRevisedInventoryDraft({}); setRevisedPortfolioServiceLevel(95); }}
+                style={{ background: "white", color: "#111827", border: "1px solid #d1d5db", borderRadius: "12px", padding: "10px 16px", fontWeight: 600, cursor: "pointer" }}
+              >
+                Reset Draft
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div style={{...filterCardStyle, display: "flex", justifyContent: "space-between", alignItems: "center", gap: "16px", flexWrap: "wrap" }}>
+          <div>
+            <h3 style={{ margin: 0, fontSize: "16px", fontWeight: 700 }}>Target Service Level</h3>
+            <p style={{ margin: "4px 0 0 0", color: "#6b7280", fontSize: "13px" }}>
+              Recalculates safety stock targets for ALL products.
+            </p>
+            <p style={{ margin: "6px 0 0 0", color: inventoryRefreshError ? "#b91c1c" : "#6b7280", fontSize: "12px", fontWeight: inventoryRefreshError ? 700 : 500 }}>
+              {inventoryRefreshError
+                ? `Tableau refresh failed: ${inventoryRefreshError}`
+                : inventoryLastRefreshedAt
+                  ? `Tableau inventory refreshed ${formatLockedAt(inventoryLastRefreshedAt)}`
+                  : "Tableau inventory has not been manually refreshed in this session."}
+            </p>
+          </div>
+          <select
+            value={revisedPortfolioServiceLevel}
+            onChange={(e) => updateRevisedPortfolioServiceLevel(Number(e.target.value) as RevisedServiceLevel)}
+            style={{...selectStyle, width: "180px", fontWeight: 700}}
+          >
+            {REVISED_SERVICE_LEVELS.map((level) => (
+              <option key={level} value={level}>{level}%</option>
+            ))}
+          </select>
+        </div>
+
+        <div style={tableCardStyle}>
+          <div style={{ padding: "20px 24px", borderBottom: "1px solid #e5e7eb" }}>
+            <h3 style={{ margin: 0, fontSize: "18px", fontWeight: 700 }}>Draft Inventory Inputs</h3>
+            <p style={{ margin: "4px 0 0 0", color: "#6b7280", fontSize: "13px" }}>
+              WIP is beer already started in tank. The revised brew plan treats it as a scheduled receipt, not as starting inventory for new brew decisions.
+            </p>
+          </div>
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", minWidth: "1180px", borderCollapse: "collapse" }}>
+              <thead>
+                <tr style={{ background: "#f8fafc" }}>
+                  <th style={{ textAlign: "left", padding: "14px 16px", borderBottom: "1px solid #e5e7eb", fontSize: "13px" }}>Brand</th>
+                  <th style={{ textAlign: "center", padding: "14px 16px", borderBottom: "1px solid #e5e7eb", fontSize: "13px" }}>Total Tableau Inv</th>
+                  <th style={{ textAlign: "center", padding: "14px 16px", borderBottom: "1px solid #e5e7eb", fontSize: "13px" }}>WIP Already in Tank</th>
+                  <th style={{ textAlign: "center", padding: "14px 16px", borderBottom: "1px solid #e5e7eb", fontSize: "13px" }}>Draft Starting Inv</th>
+                  <th style={{ textAlign: "center", padding: "14px 16px", borderBottom: "1px solid #e5e7eb", fontSize: "13px" }}>Std Dev Lookback</th>
+                  <th style={{ textAlign: "center", padding: "14px 16px", borderBottom: "1px solid #e5e7eb", fontSize: "13px" }}>Std Dev</th>
+                  <th style={{ textAlign: "center", padding: "14px 16px", borderBottom: "1px solid #e5e7eb", fontSize: "13px" }}>Calculated Safety Stock</th>
+                  <th style={{ textAlign: "center", padding: "14px 16px", borderBottom: "1px solid #e5e7eb", fontSize: "13px" }}>Draft Safety Stock</th>
+                  <th style={{ textAlign: "center", padding: "14px 16px", borderBottom: "1px solid #e5e7eb", fontSize: "13px" }}>Avg Demand</th>
+                </tr>
+              </thead>
+              <tbody>
+                {enrichedInventoryDB.map((item, index) => {
+                  const safetyStats = revisedSafetyStatsByProduct[item.name] || { lookbackWeeks: 13, stdDev: 0 };
+                  const calculatedSafetyStock = getCalculatedRevisedSafetyStock(item.name);
+                  const wipInventory = revisedWipByProduct[item.name] ?? 0;
+                  const defaultStartingInventory = getDefaultRevisedStartingInventory(item.name);
+                  return (
+                    <tr key={item.name} style={{ background: index % 2 === 0 ? "white" : "#fcfcfd" }}>
+                      <td style={{...cellStyle, fontWeight: 700}}>{item.name}</td>
+                      <td style={{...cellStyle, textAlign: "center", color: "#6b7280"}}>{formatNumber(item.startInv)}</td>
+                      <td style={{...cellStyle, textAlign: "center", color: wipInventory > 0 ? "#047857" : "#9ca3af", fontWeight: wipInventory > 0 ? 800 : 500}}>{wipInventory > 0 ? formatNumber(wipInventory) : "-"}</td>
+                      <td style={{...cellStyle, textAlign: "center"}}>
+                        <input
+                          type="number"
+                          value={revisedInventoryDraft[item.name]?.startInv ?? String(defaultStartingInventory)}
+                          onChange={(e) => updateRevisedInventoryDraft(item.name, "startInv", e.target.value)}
+                          style={{...inputStyle, textAlign: "center"}}
+                        />
+                      </td>
+                      <td style={{...cellStyle, textAlign: "center", color: "#6b7280"}}>{safetyStats.lookbackWeeks} wks</td>
+                      <td style={{...cellStyle, textAlign: "center", color: "#6b7280"}}>{formatNumber(safetyStats.stdDev)}</td>
+                      <td style={{...cellStyle, textAlign: "center", color: "#7e22ce", fontWeight: 700}}>{formatNumber(calculatedSafetyStock)}</td>
+                      <td style={{...cellStyle, textAlign: "center"}}>
+                        <input
+                          type="number"
+                          value={revisedInventoryDraft[item.name]?.finalSS ?? String(calculatedSafetyStock)}
+                          onChange={(e) => updateRevisedInventoryDraft(item.name, "finalSS", e.target.value)}
+                          style={{...inputStyle, textAlign: "center"}}
+                        />
+                      </td>
+                      <td style={{...cellStyle, textAlign: "center", color: "#6b7280"}}>{formatNumber(item.avgDemand)}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  function renderRevisedBrewingTab() {
+    const selectedProduct = revisedSelectedProduct || products[0] || "";
+    const productPlanRows = currentRevisedBrewPlan?.productLevelBrewPlan ?? [];
+    const selectedRows = currentRevisedBrewPlan?.productLevelBrewPlan.filter((row) => row.product_id === selectedProduct) ?? [];
+    const weekOptions = currentRevisedBrewPlan?.weeklyCapacitySummary.map((week) => week.week_start_date) ?? [];
+    const selectedWeek = weekOptions.includes(revisedSelectedWeek) ? revisedSelectedWeek : (weekOptions[0] ?? "");
+    const selectedWeekRow = selectedRows.find((row) => row.week_start_date === selectedWeek) ?? selectedRows[0];
+    const selectedWeekIndex = selectedRows.findIndex((row) => row.week_start_date === selectedWeekRow?.week_start_date);
+    const releaseDriverRows = selectedWeekIndex >= 0
+      ? selectedRows.filter((row, receiptIndex) => {
+        if (row.planned_order_receipt <= 0) return false;
+        const releaseIndex = receiptIndex - 2;
+        return releaseIndex === selectedWeekIndex || (selectedWeekIndex === 0 && releaseIndex < 0);
+      })
+      : [];
+    const explanationRow = releaseDriverRows[0] ?? selectedWeekRow;
+    const compactProducts = Array.from(new Set(productPlanRows.map((row) => row.product_id)))
+      .map((productId) => productPlanRows.find((row) => row.product_id === productId))
+      .filter(Boolean);
+    const generatedDate = currentRevisedBrewPlan?.generatedAt
+      ? new Date(currentRevisedBrewPlan.generatedAt).toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })
+      : null;
+
+    const statusStyle = (status: string): React.CSSProperties => {
+      if (status === "OVER_CAPACITY") return { color: "#fca5a5", background: "#7f1d1d", border: "1px solid #991b1b" };
+      if (status === "WARNING") return { color: "#fde68a", background: "#78350f", border: "1px solid #92400e" };
+      return { color: "#bbf7d0", background: "#14532d", border: "1px solid #166534" };
+    };
+
+    return (
+      <div style={{ display: "flex", flexDirection: "column", gap: "20px" }}>
+        <div style={chartCardStyle}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: "16px", flexWrap: "wrap" }}>
+            <div>
+              <h2 style={{ margin: 0, fontSize: "28px", fontWeight: 700 }}>Revised Brewing Plan</h2>
+              <p style={{ marginTop: "8px", marginBottom: 0, color: "#6b7280" }}>
+                Product-level MRP plan using forecasted barrels, revised Tableau inventory, 50-BBL batch multiples, and a 2-week brewing offset.
+              </p>
+              {generatedDate && (
+                <p style={{ margin: "8px 0 0 0", color: "#2563eb", fontSize: "13px", fontWeight: 700 }}>
+                  Last generated {generatedDate} · Forecast cycle {currentRevisedBrewPlan?.forecastCycleId}
+                </p>
+              )}
+            </div>
+            <button
+              onClick={generateRevisedBrewPlan}
+              disabled={revisedBrewPlanningInput.productForecasts.length === 0}
+              style={{
+                padding: "11px 16px",
+                borderRadius: "10px",
+                border: "1px solid #2563eb",
+                background: revisedBrewPlanningInput.productForecasts.length === 0 ? "#bfdbfe" : "#2563eb",
+                color: "white",
+                fontWeight: 800,
+                cursor: revisedBrewPlanningInput.productForecasts.length === 0 ? "not-allowed" : "pointer",
+              }}
+            >
+              Generate Revised Brewing Plan
+            </button>
+          </div>
+        </div>
+
+        <div style={{...filterCardStyle, display: "flex", justifyContent: "space-between", alignItems: "center", gap: "16px", flexWrap: "wrap" }}>
+          <div>
+            <label style={labelStyle}>Planning Horizon</label>
+            <select
+              value={revisedPlanningHorizonWeeks}
+              onChange={(e) => updateRevisedPlanningHorizonWeeks(Number(e.target.value))}
+              style={{...selectStyle, width: "180px", fontWeight: 700}}
+            >
+              {[4, 6, 8].map((weeks) => <option key={weeks} value={weeks}>{weeks} weeks</option>)}
+            </select>
+          </div>
+          <div style={{ color: "#6b7280", fontSize: "13px", maxWidth: "560px" }}>
+            Service level is currently controlled from the portfolio selector on Revised Inventory Plan. Product-level service overrides can feed this same plan input later.
+          </div>
+        </div>
+
+        <div style={{...chartCardStyle, background: "#111827", color: "white"}}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: "16px", flexWrap: "wrap", marginBottom: "16px" }}>
+            <div>
+              <h3 style={{ margin: 0, fontSize: "20px", fontWeight: 700 }}>Weekly Rough-Cut Capacity</h3>
+              <p style={{ margin: "4px 0 0 0", color: "#9ca3af", fontSize: "13px" }}>Based on planned order releases, not receipts.</p>
+            </div>
+            <span style={{ color: "#a78bfa", fontWeight: 700 }}>{WARNING_THRESHOLD} bbl target · {MAX_CAPACITY} bbl max</span>
+          </div>
+          {currentRevisedBrewPlan ? (
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(135px, 1fr))", gap: "12px" }}>
+              {currentRevisedBrewPlan.weeklyCapacitySummary.map((week) => (
+                <div key={week.week_start_date} style={{ padding: "14px", borderRadius: "12px", background: "#1e293b", border: "1px solid #334155", textAlign: "center" }}>
+                  <div style={{ fontSize: "12px", color: "#94a3b8", marginBottom: "8px" }}>{week.week_start_date}</div>
+                  <div style={{ fontSize: "22px", fontWeight: 900 }}>{formatNumber(week.total_planned_order_release_barrels)}</div>
+                  <div style={{ fontSize: "12px", color: "#64748b", fontWeight: 700, marginTop: "4px" }}>{Math.round(week.utilization_percent_of_max)}% of max</div>
+                  <div style={{ marginTop: "10px", borderRadius: "999px", padding: "4px 8px", fontSize: "11px", fontWeight: 900, ...statusStyle(week.capacity_status) }}>{week.capacity_status}</div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div style={{ padding: "18px", borderRadius: "12px", background: "#1e293b", border: "1px dashed #475569", color: "#cbd5e1" }}>
+              Generate a revised plan to see weekly planned releases and capacity status.
+            </div>
+          )}
+        </div>
+
+        {productPlanRows.length > 0 && (
+          <div style={tableCardStyle}>
+            <div style={{ padding: "20px 24px", borderBottom: "1px solid #e5e7eb" }}>
+              <h3 style={{ margin: 0, fontSize: "20px" }}>Planned Brew Starts by Brand and Week</h3>
+              <p style={{ margin: "4px 0 0 0", color: "#6b7280", fontSize: "13px" }}>
+                This is the operator-facing view: how many barrels to start brewing that week. All brew starts are 50-BBL multiples.
+              </p>
+            </div>
+            <div style={{ overflowX: "auto" }}>
+              <table style={{ width: "100%", minWidth: "900px", borderCollapse: "collapse" }}>
+                <thead>
+                  <tr style={{ background: "#f8fafc" }}>
+                    <th style={{ textAlign: "left", padding: "12px 14px", borderBottom: "1px solid #e5e7eb", fontSize: "12px" }}>Brand</th>
+                    {weekOptions.map((week) => (
+                      <th key={week} style={{ textAlign: "center", padding: "12px 14px", borderBottom: "1px solid #e5e7eb", fontSize: "12px" }}>{week}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {compactProducts.map((product, index) => (
+                    <tr key={product!.product_id} style={{ background: index % 2 === 0 ? "white" : "#fcfcfd" }}>
+                      <td style={{...cellStyle, fontWeight: 700}}>{product!.product_name}</td>
+                      {weekOptions.map((week) => {
+                        const row = productPlanRows.find((item) => item.product_id === product!.product_id && item.week_start_date === week);
+                        return (
+                          <td key={week} style={{...cellStyle, textAlign: "center", fontWeight: row?.planned_order_release ? 900 : 500, color: row?.planned_order_release ? "#7e22ce" : "#9ca3af"}}>
+                            {row?.planned_order_release ? formatNumber(row.planned_order_release) : "-"}
+                          </td>
+                        );
+                      })}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+
+        {currentRevisedBrewPlan && (
+          <div style={tableCardStyle}>
+            <div style={{ padding: "20px 24px", borderBottom: "1px solid #e5e7eb" }}>
+              <h3 style={{ margin: 0, fontSize: "20px" }}>Recommendation Detail</h3>
+              <p style={{ margin: "4px 0 0 0", color: "#6b7280", fontSize: "13px" }}>
+                Pick a brand and week to see the recommended brew start and the numbers behind it.
+              </p>
+            </div>
+
+            <div style={{ padding: "20px 24px", display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: "16px", borderBottom: "1px solid #e5e7eb" }}>
+              <div>
+                <label style={labelStyle}>Brand</label>
+                <select value={selectedProduct} onChange={(e) => setRevisedSelectedProduct(e.target.value)} style={selectStyle}>
+                  {compactProducts.map((product) => <option key={product!.product_id} value={product!.product_id}>{product!.product_name}</option>)}
+                </select>
+              </div>
+              <div>
+                <label style={labelStyle}>Brew Start Week</label>
+                <select value={selectedWeek} onChange={(e) => setRevisedSelectedWeek(e.target.value)} style={selectStyle}>
+                  {weekOptions.map((week) => <option key={week} value={week}>{week}</option>)}
+                </select>
+              </div>
+            </div>
+
+            {selectedWeekRow && explanationRow && (
+              <div style={{ padding: "24px", display: "grid", gap: "20px" }}>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: "14px" }}>
+                  <div style={{ background: "#f3e8ff", border: "1px solid #d8b4fe", borderRadius: "14px", padding: "18px" }}>
+                    <div style={{ fontSize: "12px", color: "#7e22ce", fontWeight: 800, marginBottom: "8px" }}>BREW THIS WEEK</div>
+                    <div style={{ fontSize: "34px", fontWeight: 900, color: "#581c87" }}>{selectedWeekRow.planned_order_release > 0 ? formatNumber(selectedWeekRow.planned_order_release) : "0"} BBL</div>
+                    <div style={{ fontSize: "12px", color: "#6b21a8", marginTop: "8px" }}>
+                      {selectedWeekRow.planned_order_release > 0
+                        ? `This is the planned order release for ${selectedWeek}.`
+                        : "No brew start is recommended for this brand and week."}
+                    </div>
+                  </div>
+                  <div style={{ background: "#ecfdf5", border: "1px solid #bbf7d0", borderRadius: "14px", padding: "18px" }}>
+                    <div style={{ fontSize: "12px", color: "#047857", fontWeight: 800, marginBottom: "8px" }}>BEER READY WEEK(S)</div>
+                    <div style={{ fontSize: "28px", fontWeight: 900, color: "#065f46" }}>
+                      {releaseDriverRows.length > 0 ? releaseDriverRows.map((row) => row.week_start_date).join(", ") : "-"}
+                    </div>
+                    <div style={{ fontSize: "12px", color: "#047857", marginTop: "8px" }}>Brew starts are offset 2 weeks before planned receipts.</div>
+                  </div>
+                  <div style={{ background: "#eff6ff", border: "1px solid #bfdbfe", borderRadius: "14px", padding: "18px" }}>
+                    <div style={{ fontSize: "12px", color: "#1d4ed8", fontWeight: 800, marginBottom: "8px" }}>CAPACITY STATUS</div>
+                    <div style={{ display: "inline-block", borderRadius: "999px", padding: "7px 11px", fontSize: "12px", fontWeight: 900, ...statusStyle(selectedWeekRow.capacity_status) }}>{selectedWeekRow.capacity_status}</div>
+                    <div style={{ fontSize: "12px", color: "#1d4ed8", marginTop: "10px" }}>Status is based on total portfolio releases that week.</div>
+                  </div>
+                </div>
+
+                {releaseDriverRows.length > 0 && (
+                  <div style={{ border: "1px solid #e5e7eb", borderRadius: "14px", overflow: "hidden" }}>
+                    <div style={{ padding: "14px 18px", background: "#f8fafc", borderBottom: "1px solid #e5e7eb", fontWeight: 800 }}>
+                      Receipts Driving This Brew Start
+                    </div>
+                    <div style={{ overflowX: "auto" }}>
+                      <table style={{ width: "100%", minWidth: "720px", borderCollapse: "collapse" }}>
+                        <thead>
+                          <tr>
+                            {["Need Week", "Forecast", "Start Inv", "Safety Stock", "Net Req", "Rounded Receipt"].map((header) => (
+                              <th key={header} style={{ textAlign: "center", padding: "10px 12px", borderBottom: "1px solid #e5e7eb", fontSize: "12px", color: "#6b7280" }}>{header}</th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {releaseDriverRows.map((row) => (
+                            <tr key={row.week_start_date}>
+                              <td style={{...cellStyle, textAlign: "center", fontWeight: 700}}>{row.week_start_date}</td>
+                              <td style={{...cellStyle, textAlign: "center"}}>{formatNumber(row.gross_requirements)}</td>
+                              <td style={{...cellStyle, textAlign: "center"}}>{formatNumber(row.starting_inventory)}</td>
+                              <td style={{...cellStyle, textAlign: "center"}}>{formatNumber(row.safety_stock)}</td>
+                              <td style={{...cellStyle, textAlign: "center"}}>{formatNumber(row.net_requirement)}</td>
+                              <td style={{...cellStyle, textAlign: "center", color: "#16a34a", fontWeight: 900}}>{formatNumber(row.planned_order_receipt)}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                )}
+
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: "16px" }}>
+                  <div style={{ border: "1px solid #e5e7eb", borderRadius: "14px", padding: "18px" }}>
+                    <h4 style={{ margin: "0 0 12px 0", fontSize: "16px" }}>Why This Brew Is Needed</h4>
+                    <div style={{ display: "grid", gap: "10px", fontSize: "14px" }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", gap: "12px" }}><span>Need week</span><strong>{explanationRow.week_start_date}</strong></div>
+                      <div style={{ display: "flex", justifyContent: "space-between", gap: "12px" }}><span>Gross requirements / forecast</span><strong>{formatNumber(explanationRow.gross_requirements)} BBL</strong></div>
+                      <div style={{ display: "flex", justifyContent: "space-between", gap: "12px" }}><span>Starting projected inventory</span><strong>{formatNumber(explanationRow.starting_inventory)} BBL</strong></div>
+                      <div style={{ display: "flex", justifyContent: "space-between", gap: "12px" }}><span>Scheduled receipts / WIP</span><strong>{formatNumber(explanationRow.scheduled_receipts)} BBL</strong></div>
+                      <div style={{ display: "flex", justifyContent: "space-between", gap: "12px" }}><span>Safety stock target</span><strong>{formatNumber(explanationRow.safety_stock)} BBL</strong></div>
+                      <div style={{ display: "flex", justifyContent: "space-between", gap: "12px", paddingTop: "10px", borderTop: "1px solid #e5e7eb" }}><span>Net requirement</span><strong>{formatNumber(explanationRow.net_requirement)} BBL</strong></div>
+                      <div style={{ display: "flex", justifyContent: "space-between", gap: "12px" }}><span>Rounded planned receipt</span><strong>{explanationRow.planned_order_receipt > 0 ? formatNumber(explanationRow.planned_order_receipt) : "0"} BBL</strong></div>
+                    </div>
+                  </div>
+
+                  <div style={{ border: "1px solid #e5e7eb", borderRadius: "14px", padding: "18px" }}>
+                    <h4 style={{ margin: "0 0 12px 0", fontSize: "16px" }}>Calculation Details</h4>
+                    <div style={{ display: "grid", gap: "10px", fontSize: "14px" }}>
+                      <div style={{ color: "#374151" }}>
+                        Net requirement = forecast + safety stock - starting projected inventory - scheduled receipts
+                      </div>
+                      <div style={{ background: "#f8fafc", border: "1px solid #e5e7eb", borderRadius: "10px", padding: "12px", fontFamily: "monospace", fontSize: "13px", color: "#111827" }}>
+                        max(0, {formatNumber(explanationRow.gross_requirements)} + {formatNumber(explanationRow.safety_stock)} - {formatNumber(explanationRow.starting_inventory)} - {formatNumber(explanationRow.scheduled_receipts)}) = {formatNumber(explanationRow.net_requirement)}
+                      </div>
+                      <div style={{ color: "#374151" }}>
+                        Planned receipt is rounded up to the next 50-BBL batch. Planned release is placed 2 weeks earlier.
+                      </div>
+                      <div style={{ display: "flex", justifyContent: "space-between", gap: "12px" }}><span>Historical std dev</span><strong>{formatNumber(explanationRow.historical_demand_std_dev)} BBL</strong></div>
+                      <div style={{ display: "flex", justifyContent: "space-between", gap: "12px" }}><span>Service level / factor</span><strong>{explanationRow.service_level}% / {formatNumber(explanationRow.safety_factor)}</strong></div>
+                      <div style={{ display: "flex", justifyContent: "space-between", gap: "12px" }}><span>Level-loaded theory</span><strong>{formatNumber(explanationRow.level_production_barrels)} BBL/week</strong></div>
+                      <div style={{ display: "flex", justifyContent: "space-between", gap: "12px" }}><span>Level projected inventory</span><strong>{formatNumber(explanationRow.level_projected_inventory)} BBL</strong></div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -1928,9 +2500,10 @@ export default function Home() {
             {activeTab === "Overview" && renderOverviewTab()}
             {activeTab === "Forecasted Demand" && renderDemandPlanTab()}
             {activeTab === "Inventory" && renderInventoryTab()}
+            {activeTab === "Revised Inventory Plan" && renderRevisedInventoryTab()}
             {activeTab === "Brewing Plan" && renderBrewingTab()}
+            {activeTab === "Revised Brewing Plan" && renderRevisedBrewingTab()}
             {activeTab === "Packaging Plan" && renderPackagingTab()}
-            {activeTab === "Allocation Plan - Coming Soon" && <div style={chartCardStyle}><h2>{activeTab}</h2><p>Coming Soon</p></div>}
           </>
         )}
       </div>

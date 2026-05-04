@@ -6,7 +6,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "test:brew": "node --test --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON app/brewPlanningService.test.mts"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.102.1",
