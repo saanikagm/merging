@@ -1,5 +1,10 @@
 This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
 
+## Client documentation
+
+- [Calculation Methodology](docs/calculation-methodology.md) explains how the app creates the demand forecast, inventory targets, brewing plan, and packaging plan.
+- [Quick Start Guide](QUICK_START.md) explains the app workflow for users.
+
 ## Getting Started
 
 First, run the development server:
