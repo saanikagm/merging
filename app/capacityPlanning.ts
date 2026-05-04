@@ -4,7 +4,10 @@ export function generateCapacityPlan(name: string, forecasts: number[], startInv
     let plannedRelease = [];
 
     let currentInv = startInv;
-    const batchSize = 50;
+
+    // CHANGED: Lowered Lot Size to 25 BBLs based on professor feedback
+    // This creates a leaner inventory profile for slow-moving beers.
+    const batchSize = 25;
     const leadTime = 2;
 
     for (let i = 0; i < 8; i++) {
@@ -19,6 +22,7 @@ export function generateCapacityPlan(name: string, forecasts: number[], startInv
         } else {
             if (projectedInv < safetyStock) {
                 let gap = safetyStock - projectedInv;
+                // Calculates how many 25 BBL batches are needed to cross the safety stock line
                 receipt = Math.ceil(gap / batchSize) * batchSize;
             }
         }
@@ -28,7 +32,7 @@ export function generateCapacityPlan(name: string, forecasts: number[], startInv
         projAvailable.push(currentInv);
     }
 
-    // NEW: Aggregate any receipts that fall into the "past due" window
+    // Aggregate any receipts that fall into the "past due" window
     let pastDueBrews = 0;
     for (let j = 0; j < leadTime; j++) {
         pastDueBrews += plannedReceipt[j] || 0;
@@ -37,7 +41,7 @@ export function generateCapacityPlan(name: string, forecasts: number[], startInv
     for (let i = 0; i < 6; i++) {
         let release = manualReleases[i] !== undefined ? manualReleases[i] : (plannedReceipt[i + leadTime] || 0);
 
-        // NEW: Force past-due brews into the immediate Week 0 "Start Brewing" schedule
+        // Force past-due brews into the immediate Week 0 "Start Brewing" schedule
         if (i === 0 && manualReleases[i] === undefined) {
             release += pastDueBrews;
         }
