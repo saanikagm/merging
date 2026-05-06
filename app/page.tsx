@@ -708,6 +708,7 @@ export default function Home() {
   const BREW_DISPLAY_WEEKS = 6;
   const BREW_LEAD_TIME_WEEKS = 2;
   const BREW_BATCH_SIZE = 50;
+  const PACKAGING_DISPLAY_WEEKS = 4;
 
   const chartData = useMemo(() => {
     const map: Record<number, { week: string; forecast: number; effective: number }> = {};
@@ -1029,7 +1030,7 @@ export default function Home() {
     const summaries = result.weeklySummary.filter((s) => s.product_id === selectedOpsProduct);
 
     const sixWeekVelocityByFormat: Record<string, number> = {};
-    productRows.slice(0, 6 * Math.max(1, new Set(productRows.map((r) => r.packaging_format)).size)).forEach((r) => {
+    productRows.slice(0, PACKAGING_DISPLAY_WEEKS * Math.max(1, new Set(productRows.map((r) => r.packaging_format)).size)).forEach((r) => {
       sixWeekVelocityByFormat[r.packaging_format] = (sixWeekVelocityByFormat[r.packaging_format] ?? 0) + r.forecast_demand_bbl;
     });
 
@@ -1040,7 +1041,7 @@ export default function Home() {
       return "No liquid ready";
     };
 
-    return weekStartDates.slice(0, 6).map((weekStart, weekIndex) => {
+    return weekStartDates.slice(0, PACKAGING_DISPLAY_WEEKS).map((weekStart, weekIndex) => {
       const summary = summaries.find((s) => s.week_start_date === weekStart);
       const weekRows = productRows.filter((r) => r.week_start_date === weekStart);
       const detailRows = weekRows.map((r) => ({
@@ -1527,6 +1528,7 @@ export default function Home() {
       forecasts: slice.map((row) => row.forecast_barrels),
       projAvailable: slice.map((row) => row.projected_available),
       plannedReceipt: slice.map((row) => row.planned_order_receipt),
+      scheduledReceipts: slice.map((row) => row.scheduled_receipts),
       plannedRelease: slice.map((row) => row.planned_order_release),
       netRequirements: slice.map((row) => row.net_requirement),
       grossRequirements: slice.map((row) => row.gross_requirements),
@@ -1712,9 +1714,14 @@ export default function Home() {
                             {productPlan.forecasts.map((f, i) => <td key={i} style={{...cellStyle, textAlign: 'center', color: '#dc2626'}}>{formatNumber(f)}</td>)}
                         </tr>
                         <tr style={{ borderBottom: '1px solid #f1f5f9' }}>
+                            <td style={{...cellStyle, color: '#0891b2', fontWeight: 'bold'}}>🛢️ WIP Arriving</td>
+                            <td style={cellStyle}>-</td>
+                            {productPlan.scheduledReceipts.map((r, i) => <td key={i} style={{...cellStyle, textAlign: 'center', color: '#0891b2', fontWeight: 'bold'}}>{r > 0 ? formatNumber(r) : '-'}</td>)}
+                        </tr>
+                        <tr style={{ borderBottom: '1px solid #f1f5f9' }}>
                             <td style={{...cellStyle, color: '#16a34a', fontWeight: 'bold'}}>➕ Brews Arriving</td>
                             <td style={cellStyle}>-</td>
-                            {productPlan.plannedReceipt.map((r, i) => <td key={i} style={{...cellStyle, textAlign: 'center', color: '#16a34a', fontWeight: 'bold'}}>{r > 0 ? r : '-'}</td>)}
+                            {productPlan.plannedReceipt.map((r, i) => <td key={i} style={{...cellStyle, textAlign: 'center', color: '#16a34a', fontWeight: 'bold'}}>{r > 0 ? formatNumber(r) : '-'}</td>)}
                         </tr>
                         <tr style={{ background: '#f8fafc', borderBottom: '1px solid #e5e7eb' }}>
                             <td style={{...cellStyle, fontWeight: 'bold'}}>📦 Ending Inventory</td>
@@ -1763,7 +1770,7 @@ export default function Home() {
                 <table style={{ width: "100%", minWidth: "900px", borderCollapse: "collapse" }}>
                     <thead>
                         <tr style={{ background: "#f8fafc" }}>
-                            {["Week", "Forecast", "Start Inv", "Safety Stock", "Net Req", "Rounded Receipt", "Ending Inv"].map((header) => (
+                            {["Week", "Forecast", "Start Inv", "Safety Stock", "WIP Arriving", "Net Req", "Rounded Receipt", "Ending Inv"].map((header) => (
                                 <th key={header} style={{ textAlign: "center", padding: "12px 14px", borderBottom: "1px solid #e5e7eb", fontSize: "12px", color: "#6b7280" }}>{header}</th>
                             ))}
                         </tr>
@@ -1775,6 +1782,7 @@ export default function Home() {
                                 <td style={{...cellStyle, textAlign: "center"}}>{formatNumber(forecast)}</td>
                                 <td style={{...cellStyle, textAlign: "center"}}>{formatNumber(productPlan.startingInventoryByWeek[i])}</td>
                                 <td style={{...cellStyle, textAlign: "center"}}>{formatNumber(productPlan.safetyStock)}</td>
+                                <td style={{...cellStyle, textAlign: "center", color: "#0891b2", fontWeight: 700}}>{productPlan.scheduledReceipts[i] > 0 ? formatNumber(productPlan.scheduledReceipts[i]) : "-"}</td>
                                 <td style={{...cellStyle, textAlign: "center"}}>{formatNumber(productPlan.netRequirements[i])}</td>
                                 <td style={{...cellStyle, textAlign: "center", color: "#16a34a", fontWeight: 900}}>{productPlan.plannedReceipt[i] > 0 ? formatNumber(productPlan.plannedReceipt[i]) : "-"}</td>
                                 <td style={{...cellStyle, textAlign: "center", fontWeight: 700, color: productPlan.projAvailable[i] < productPlan.safetyStock ? "#dc2626" : "#111827"}}>{formatNumber(productPlan.projAvailable[i])}</td>
