@@ -26,6 +26,7 @@ type DemandPlanRow = {
   id: string; brand: string; channel: string; packaging_format: string;
   week_number: number; year: number; previous_value: number | null;
   effective_value: number | null; session_id: string;
+  override_rationale?: string | null;
 };
 
 type HistoricalRow = {
@@ -66,7 +67,7 @@ type PendingAudit = {
   inventoryField?: "startInv" | "finalSS";
 };
 
-const TABS = ["Overview", "Forecasted Demand", "Inventory", "Brewing Plan", "Packaging Plan"] as const;
+const TABS = ["Overview", "Forecasted Demand", "Inventory", "Brewing Plan", "Packaging Plan", "Plan Summary"] as const;
 type TabName = (typeof TABS)[number];
 
 // --- HELPER MATH ---
@@ -2211,6 +2212,257 @@ export default function Home() {
     );
   }
 
+  function renderSummaryTab() {
+    const zRatio = getZRatio(globalServiceLevel);
+
+    const demandChangesProduct = rows
+      .filter((r) => r.packaging_format === "ALL" && r.effective_value != null && r.effective_value !== r.previous_value)
+      .sort((a, b) => a.brand.localeCompare(b.brand) || a.week_number - b.week_number);
+    const demandChangesPackaging = rows
+      .filter((r) => r.packaging_format !== "ALL" && r.effective_value != null && r.effective_value !== r.previous_value)
+      .sort((a, b) => a.brand.localeCompare(b.brand) || a.packaging_format.localeCompare(b.packaging_format) || a.week_number - b.week_number);
+
+    const inventoryChanges = inventoryDB.filter((item) => {
+      const calcSS = Number(((item.baseSafetyStock ?? 0) * zRatio).toFixed(2));
+      const startEdited = Number(item.startInv).toFixed(2) !== Number(item.originalStartInv).toFixed(2);
+      const ssEdited = Number(item.finalSS).toFixed(2) !== calcSS.toFixed(2);
+      return startEdited || ssEdited;
+    });
+
+    const brewingChanges: Array<{ brand: string; weekIndex: number; weekLabel: string; value: number; suggested: number | null }> = [];
+    Object.entries(manualBrewPlan).forEach(([brand, plan]) => {
+      Object.entries(plan).forEach(([wkStr, val]) => {
+        const wk = Number(wkStr);
+        const productRows = brewPlanResult?.productLevelBrewPlan.filter((r) => r.product_id === brand) ?? [];
+        const suggested = productRows[wk]?.planned_order_release ?? null;
+        brewingChanges.push({ brand, weekIndex: wk, weekLabel: weekLabels[wk] ?? `Wk ${wk + 1}`, value: val, suggested });
+      });
+    });
+    brewingChanges.sort((a, b) => a.brand.localeCompare(b.brand) || a.weekIndex - b.weekIndex);
+
+    const totalDemandBbl = rows
+      .filter((r) => r.packaging_format === "ALL")
+      .reduce((s, r) => s + getEffectiveOrForecast(r), 0);
+    const brandCount = new Set(rows.map((r) => r.brand)).size;
+    const totalBrewBbl = brewPlanResult
+      ? brewPlanResult.productLevelBrewPlan.reduce((s, r) => s + r.planned_order_release, 0)
+      : 0;
+    const brewedProducts = brewPlanResult
+      ? new Set(brewPlanResult.productLevelBrewPlan.filter((r) => r.planned_order_release > 0).map((r) => r.product_id)).size
+      : 0;
+    const totalPackagingUnits = packagingPlanResult
+      ? Math.round(packagingPlanResult.packagingPlan.reduce((s, r) => s + r.package_units, 0))
+      : 0;
+    const totalPackagedBbl = packagingPlanResult
+      ? packagingPlanResult.packagingPlan.reduce((s, r) => s + r.allocated_bbl, 0)
+      : 0;
+
+    const stageStatuses: Array<{ name: string; lockedAt: string | null }> = [
+      { name: "Demand Plan", lockedAt: planWorkflow.demandLockedAt },
+      { name: "Inventory Plan", lockedAt: planWorkflow.inventoryLockedAt },
+      { name: "Brewing Plan", lockedAt: planWorkflow.brewingLockedAt },
+    ];
+
+    const headerCellStyle: React.CSSProperties = {
+      textAlign: "left", padding: "12px 16px", borderBottom: "1px solid #e5e7eb",
+      fontSize: "12px", fontWeight: 700, color: "#374151", textTransform: "uppercase", letterSpacing: "0.04em",
+    };
+    const numCellStyle: React.CSSProperties = { ...cellStyle, textAlign: "center" };
+
+    const totalChanges = demandChangesProduct.length + demandChangesPackaging.length + inventoryChanges.length + brewingChanges.length;
+
+    return (
+      <div style={{ display: "flex", flexDirection: "column", gap: "20px" }}>
+        <div style={chartCardStyle}>
+          <h2 style={{ margin: 0, fontSize: "28px", fontWeight: 700 }}>Plan Summary</h2>
+          <p style={{ marginTop: "8px", marginBottom: 0, color: "#6b7280" }}>
+            Read-only snapshot of the plan you just built — totals, lock status, and every override you made along the way.
+          </p>
+          <p style={{ marginTop: "12px", marginBottom: 0, color: "#9ca3af", fontSize: "12px" }}>
+            Forecast last generated: {latestForecastDate || "—"} · Session: {sessionId || "—"}
+          </p>
+        </div>
+
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: "16px" }}>
+          {stageStatuses.map((s) => (
+            <div key={s.name} style={overviewMetricCardStyle}>
+              <h3 style={{ margin: 0, marginBottom: "8px", fontSize: "15px", fontWeight: 700, color: "#374151" }}>{s.name}</h3>
+              {s.lockedAt ? (
+                <>
+                  <p style={{ margin: 0, color: "#047857", fontWeight: 700, fontSize: "14px" }}>Locked</p>
+                  <p style={{ margin: "4px 0 0 0", color: "#6b7280", fontSize: "12px" }}>{formatLockedAt(s.lockedAt)}</p>
+                </>
+              ) : (
+                <p style={{ margin: 0, color: "#b45309", fontWeight: 700, fontSize: "14px" }}>Not yet locked</p>
+              )}
+            </div>
+          ))}
+        </div>
+
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: "16px" }}>
+          {renderMetricCard("Demand", [
+            `${formatNumber(totalDemandBbl)} BBL`,
+            `${brandCount} brands · 8 wks`,
+            `Service level ${globalServiceLevel}%`,
+          ])}
+          {renderMetricCard("Brewing", [
+            `${formatNumber(totalBrewBbl)} BBL planned`,
+            `${brewedProducts} products to brew`,
+            `${BREW_BATCH_SIZE}-BBL batches · ${BREW_LEAD_TIME_WEEKS}-wk lead`,
+          ])}
+          {renderMetricCard("Packaging", [
+            `${totalPackagingUnits.toLocaleString()} units`,
+            `${formatNumber(totalPackagedBbl)} BBL packaged`,
+          ])}
+          {renderMetricCard("Overrides", [
+            `${totalChanges} total`,
+            `${demandChangesProduct.length + demandChangesPackaging.length} demand`,
+            `${inventoryChanges.length} inventory · ${brewingChanges.length} brewing`,
+          ])}
+        </div>
+
+        <div style={tableCardStyle}>
+          <div style={{ padding: "20px 24px", borderBottom: "1px solid #e5e7eb" }}>
+            <h3 style={{ margin: 0, fontSize: "18px", fontWeight: 700 }}>Demand Overrides</h3>
+            <p style={{ margin: "4px 0 0 0", color: "#6b7280", fontSize: "13px" }}>
+              Cells where you overrode the model&apos;s forecast.
+            </p>
+          </div>
+          {demandChangesProduct.length === 0 && demandChangesPackaging.length === 0 ? (
+            <p style={{ padding: "20px 24px", margin: 0, color: "#6b7280", fontSize: "14px" }}>No demand overrides.</p>
+          ) : (
+            <div style={{ overflowX: "auto" }}>
+              <table style={{ width: "100%", minWidth: "900px", borderCollapse: "collapse" }}>
+                <thead>
+                  <tr style={{ background: "#f8fafc" }}>
+                    <th style={headerCellStyle}>Brand</th>
+                    <th style={headerCellStyle}>Channel</th>
+                    <th style={headerCellStyle}>Packaging</th>
+                    <th style={{ ...headerCellStyle, textAlign: "center" }}>Week</th>
+                    <th style={{ ...headerCellStyle, textAlign: "center" }}>Original</th>
+                    <th style={{ ...headerCellStyle, textAlign: "center" }}>Override</th>
+                    <th style={{ ...headerCellStyle, textAlign: "center" }}>Δ</th>
+                    <th style={headerCellStyle}>Reason</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {[...demandChangesProduct, ...demandChangesPackaging].map((r, idx) => {
+                    const orig = r.previous_value ?? 0;
+                    const next = r.effective_value ?? 0;
+                    const delta = next - orig;
+                    const wkLabel = weekLabels[r.week_number - 1] ?? `Week ${r.week_number}`;
+                    return (
+                      <tr key={r.id} style={{ background: idx % 2 === 0 ? "white" : "#fcfcfd" }}>
+                        <td style={{ ...cellStyle, fontWeight: 600 }}>{r.brand}</td>
+                        <td style={cellStyle}>{r.channel}</td>
+                        <td style={cellStyle}>{r.packaging_format}</td>
+                        <td style={numCellStyle}>{wkLabel}</td>
+                        <td style={numCellStyle}>{formatNumber(orig)}</td>
+                        <td style={{ ...numCellStyle, fontWeight: 700, color: "#b45309" }}>{formatNumber(next)}</td>
+                        <td style={{ ...numCellStyle, fontWeight: 700, color: delta >= 0 ? "#047857" : "#b91c1c" }}>
+                          {delta >= 0 ? "+" : ""}{formatNumber(delta)}
+                        </td>
+                        <td style={{ ...cellStyle, color: "#6b7280", fontSize: "13px" }}>{r.override_rationale || "—"}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+
+        <div style={tableCardStyle}>
+          <div style={{ padding: "20px 24px", borderBottom: "1px solid #e5e7eb" }}>
+            <h3 style={{ margin: 0, fontSize: "18px", fontWeight: 700 }}>Inventory Overrides</h3>
+            <p style={{ margin: "4px 0 0 0", color: "#6b7280", fontSize: "13px" }}>
+              Products where starting inventory or safety stock differs from the calculated baseline.
+            </p>
+          </div>
+          {inventoryChanges.length === 0 ? (
+            <p style={{ padding: "20px 24px", margin: 0, color: "#6b7280", fontSize: "14px" }}>No inventory overrides.</p>
+          ) : (
+            <div style={{ overflowX: "auto" }}>
+              <table style={{ width: "100%", minWidth: "900px", borderCollapse: "collapse" }}>
+                <thead>
+                  <tr style={{ background: "#f8fafc" }}>
+                    <th style={headerCellStyle}>Brand</th>
+                    <th style={{ ...headerCellStyle, textAlign: "center" }}>Tableau Start</th>
+                    <th style={{ ...headerCellStyle, textAlign: "center" }}>Override Start</th>
+                    <th style={{ ...headerCellStyle, textAlign: "center" }}>Calc SS</th>
+                    <th style={{ ...headerCellStyle, textAlign: "center" }}>Override SS</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {inventoryChanges.map((item, idx) => {
+                    const calcSS = Number(((item.baseSafetyStock ?? 0) * zRatio).toFixed(2));
+                    const startEdited = Number(item.startInv).toFixed(2) !== Number(item.originalStartInv).toFixed(2);
+                    const ssEdited = Number(item.finalSS).toFixed(2) !== calcSS.toFixed(2);
+                    return (
+                      <tr key={item.name} style={{ background: idx % 2 === 0 ? "white" : "#fcfcfd" }}>
+                        <td style={{ ...cellStyle, fontWeight: 600 }}>{item.name}</td>
+                        <td style={numCellStyle}>{formatNumber(item.originalStartInv)}</td>
+                        <td style={{ ...numCellStyle, fontWeight: startEdited ? 700 : 400, color: startEdited ? "#b45309" : "#111827" }}>
+                          {formatNumber(item.startInv)}
+                        </td>
+                        <td style={numCellStyle}>{formatNumber(calcSS)}</td>
+                        <td style={{ ...numCellStyle, fontWeight: ssEdited ? 700 : 400, color: ssEdited ? "#b45309" : "#111827" }}>
+                          {formatNumber(item.finalSS)}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+
+        <div style={tableCardStyle}>
+          <div style={{ padding: "20px 24px", borderBottom: "1px solid #e5e7eb" }}>
+            <h3 style={{ margin: 0, fontSize: "18px", fontWeight: 700 }}>Brewing Overrides</h3>
+            <p style={{ margin: "4px 0 0 0", color: "#6b7280", fontSize: "13px" }}>
+              Manual changes to the planned brewing release for individual weeks.
+            </p>
+          </div>
+          {brewingChanges.length === 0 ? (
+            <p style={{ padding: "20px 24px", margin: 0, color: "#6b7280", fontSize: "14px" }}>No brewing overrides.</p>
+          ) : (
+            <div style={{ overflowX: "auto" }}>
+              <table style={{ width: "100%", minWidth: "700px", borderCollapse: "collapse" }}>
+                <thead>
+                  <tr style={{ background: "#f8fafc" }}>
+                    <th style={headerCellStyle}>Brand</th>
+                    <th style={{ ...headerCellStyle, textAlign: "center" }}>Week</th>
+                    <th style={{ ...headerCellStyle, textAlign: "center" }}>Suggested (BBL)</th>
+                    <th style={{ ...headerCellStyle, textAlign: "center" }}>Override (BBL)</th>
+                    <th style={{ ...headerCellStyle, textAlign: "center" }}>Δ</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {brewingChanges.map((c, idx) => {
+                    const delta = c.suggested == null ? null : c.value - c.suggested;
+                    return (
+                      <tr key={`${c.brand}-${c.weekIndex}`} style={{ background: idx % 2 === 0 ? "white" : "#fcfcfd" }}>
+                        <td style={{ ...cellStyle, fontWeight: 600 }}>{c.brand}</td>
+                        <td style={numCellStyle}>{c.weekLabel}</td>
+                        <td style={numCellStyle}>{c.suggested == null ? "—" : formatNumber(c.suggested)}</td>
+                        <td style={{ ...numCellStyle, fontWeight: 700, color: "#7e22ce" }}>{formatNumber(c.value)}</td>
+                        <td style={{ ...numCellStyle, fontWeight: 700, color: delta == null ? "#6b7280" : delta >= 0 ? "#047857" : "#b91c1c" }}>
+                          {delta == null ? "—" : `${delta >= 0 ? "+" : ""}${formatNumber(delta)}`}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
   function renderMetricCard(title: string, lines: string[], accentLines: number[] = []) {
     return (
       <div style={overviewMetricCardStyle}>
@@ -2257,6 +2509,7 @@ export default function Home() {
             {activeTab === "Inventory" && renderInventoryTab()}
             {activeTab === "Brewing Plan" && renderBrewingTab()}
             {activeTab === "Packaging Plan" && renderPackagingTab()}
+            {activeTab === "Plan Summary" && renderSummaryTab()}
           </>
         )}
       </div>
