@@ -1,10 +1,9 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "@/lib/supabase";
 import { generateCapacityPlan } from './capacityPlanning';
 import { type ServiceLevel } from "./brewPlanningService";
-import { buildWipByProduct } from "./revisedBrewPlanMapper";
 import {
   LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Legend,
 } from "recharts";
@@ -37,7 +36,6 @@ type InventoryRow = {
   name: string; startInv: number; originalStartInv: number; baseSafetyStock: number; finalSS: number;
 };
 
-type RevisedInventoryDraft = Record<string, { startInv: string; finalSS: string }>;
 type RevisedServiceLevel = ServiceLevel;
 
 type PackagingInventoryRow = {
@@ -55,13 +53,12 @@ type PendingAudit = {
   inventoryField?: "startInv" | "finalSS";
 };
 
-const TABS = ["Overview", "Forecasted Demand", "Inventory", "Revised Inventory Plan", "Brewing Plan", "Packaging Plan"] as const;
+const TABS = ["Overview", "Forecasted Demand", "Inventory", "Brewing Plan", "Packaging Plan"] as const;
 type TabName = (typeof TABS)[number];
 
 // --- HELPER MATH ---
 function getEffectiveOrForecast(row: DemandPlanRow) { return row.effective_value ?? row.previous_value ?? 0; }
 function formatNumber(value: number | null | undefined) { return value == null ? "" : Number(value).toFixed(2).replace(/\.00$/, ""); }
-function getZRatio(sl: number) { return sl === 99 ? 2.33 / 1.645 : sl === 90 ? 1.28 / 1.645 : sl === 85 ? 1.04 / 1.645 : 1.0; }
 const REVISED_SERVICE_LEVELS: RevisedServiceLevel[] = [90, 95, 96, 99, 99.9];
 const REVISED_SAFETY_FACTORS: Record<RevisedServiceLevel, number> = { 90: 1.28, 95: 1.65, 96: 1.75, 99: 2.33, 99.9: 4.00 };
 const LONG_LOOKBACK_PRODUCTS = ["the pupil", "pupil", "bulbous flowers"];
@@ -400,11 +397,9 @@ export default function Home() {
   const demandChartRef = useRef<HTMLDivElement>(null);
 
   // Operations States
-  const [globalServiceLevel, setGlobalServiceLevel] = useState(95);
+  const [globalServiceLevel, setGlobalServiceLevel] = useState<RevisedServiceLevel>(95);
   const [selectedOpsProduct, setSelectedOpsProduct] = useState("");
   const [manualBrewPlan, setManualBrewPlan] = useState<Record<string, Record<number, number>>>({});
-  const [revisedInventoryDraft, setRevisedInventoryDraft] = useState<RevisedInventoryDraft>({});
-  const [revisedPortfolioServiceLevel, setRevisedPortfolioServiceLevel] = useState<RevisedServiceLevel>(95);
 
   // Universal Audit State
   const [pendingEdit, setPendingEdit] = useState<PendingAudit | null>(null);
@@ -848,15 +843,6 @@ export default function Home() {
     });
   }, [productLevelRows, inventoryDB]);
 
-  const revisedWipByProduct = useMemo(() => buildWipByProduct(packagingInventoryDB), [packagingInventoryDB]);
-
-  const getDefaultRevisedStartingInventory = useCallback((name: string): number => {
-    const source = inventoryDB.find((item) => item.name === name);
-    const totalInventory = source?.startInv ?? 0;
-    const wipInventory = revisedWipByProduct[name] ?? 0;
-    return Math.max(0, Number((totalInventory - wipInventory).toFixed(2)));
-  }, [inventoryDB, revisedWipByProduct]);
-
   const revisedSafetyStatsByProduct = useMemo(() => {
     let maxTime = 0;
     historicalRows.forEach((r) => {
@@ -886,43 +872,6 @@ export default function Home() {
     });
     return stats;
   }, [historicalRows, products]);
-
-  function getCalculatedRevisedSafetyStock(name: string): number {
-    const sigma = revisedSafetyStatsByProduct[name]?.stdDev ?? 0;
-    return Number((sigma * REVISED_SAFETY_FACTORS[revisedPortfolioServiceLevel]).toFixed(2));
-  }
-
-  function updateRevisedInventoryDraft(name: string, field: "startInv" | "finalSS", value: string) {
-    setRevisedInventoryDraft((prev) => ({
-      ...prev,
-      [name]: {
-        startInv: prev[name]?.startInv ?? String(getDefaultRevisedStartingInventory(name)),
-        finalSS: prev[name]?.finalSS ?? String(inventoryDB.find((item) => item.name === name)?.finalSS ?? 10),
-        [field]: value,
-      },
-    }));
-  }
-
-  function updateRevisedPortfolioServiceLevel(serviceLevel: RevisedServiceLevel) {
-    setRevisedPortfolioServiceLevel(serviceLevel);
-    setRevisedInventoryDraft((prev) => {
-      const next: RevisedInventoryDraft = {};
-      inventoryDB.forEach((item) => {
-        const sigma = revisedSafetyStatsByProduct[item.name]?.stdDev ?? 0;
-        const safetyStock = Number((sigma * REVISED_SAFETY_FACTORS[serviceLevel]).toFixed(2));
-        next[item.name] = {
-          startInv: prev[item.name]?.startInv ?? String(getDefaultRevisedStartingInventory(item.name)),
-          finalSS: String(safetyStock),
-        };
-      });
-      return next;
-    });
-  }
-
-  async function refreshRevisedInventoryFromTableau() {
-    await refreshInventoryFromTableau();
-    setRevisedInventoryDraft({});
-  }
 
   const MAX_CAPACITY = 500;
   const WARNING_THRESHOLD = 400;
@@ -1093,10 +1042,12 @@ export default function Home() {
   }, [opsProductData, brandPackagingRows, packagingInventoryDB, selectedOpsProduct, weekLabels]);
 
 
-  const handleGlobalSLChange = (newSL: number) => {
+  const handleGlobalSLChange = (newSL: RevisedServiceLevel) => {
     setGlobalServiceLevel(newSL);
-    const z = getZRatio(newSL);
-    setInventoryDB(prev => prev.map(item => ({ ...item, finalSS: Number((item.baseSafetyStock * z).toFixed(2)) })));
+    setInventoryDB(prev => prev.map(item => {
+      const sigma = revisedSafetyStatsByProduct[item.name]?.stdDev ?? item.baseSafetyStock;
+      return { ...item, finalSS: Number((sigma * REVISED_SAFETY_FACTORS[newSL]).toFixed(2)) };
+    }));
   };
 
   const handleInventoryUpdate = (name: string, field: "startInv" | "finalSS", value: string) => {
@@ -1258,118 +1209,135 @@ export default function Home() {
   }
 
   function renderInventoryTab() {
+    const inventoryLocked = !!planWorkflow.inventoryLockedAt;
     return (
       <div style={{ display: "flex", flexDirection: "column", gap: "20px" }}>
         <div style={chartCardStyle}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: "16px", flexWrap: "wrap" }}>
-              <div>
-                <h2 style={{ margin: 0, fontSize: "28px", fontWeight: 700 }}>Inventory Parameters</h2>
-                <p style={{ marginTop: "8px", marginBottom: 0, color: "#6b7280" }}>Adjust global service levels or override specific safety stock buffers.</p>
-              </div>
-              <div style={{ display: "flex", gap: "12px", flexWrap: "wrap" }}>
-                <button
-                  onClick={refreshInventoryFromTableau}
-                  disabled={refreshingInventory}
-                  style={{ background: refreshingInventory ? "#6b7280" : "#111827", color: "white", border: "none", borderRadius: "12px", padding: "12px 18px", fontWeight: 600, cursor: refreshingInventory ? "wait" : "pointer" }}
-                >
-                  {refreshingInventory ? "Refreshing..." : "Refresh Inventory from Tableau"}
-                </button>
-                {!planWorkflow.inventoryLockedAt && (
-                  <button
-                    onClick={() => setShowLockInventoryModal(true)}
-                    style={{ background: "#047857", color: "white", border: "none", borderRadius: "12px", padding: "12px 18px", fontWeight: 600, cursor: "pointer" }}
-                  >
-                    Lock Inventory Plan
-                  </button>
-                )}
-                {planWorkflow.inventoryLockedAt && (
-                  <div style={{ display: "inline-flex", alignItems: "center", gap: "8px", background: "#ecfdf5", color: "#065f46", border: "1px solid #a7f3d0", borderRadius: "12px", padding: "12px 18px", fontWeight: 600 }}>
-                    Inventory Plan Locked — {formatLockedAt(planWorkflow.inventoryLockedAt)}
-                  </div>
-                )}
-              </div>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: "16px", flexWrap: "wrap" }}>
+            <div>
+              <h2 style={{ margin: 0, fontSize: "28px", fontWeight: 700 }}>Inventory</h2>
+              <p style={{ marginTop: "8px", marginBottom: 0, color: "#6b7280" }}>
+                Starting inventory comes from Tableau. Safety stock = historical std dev × service-level factor; override per product if needed.
+              </p>
             </div>
+            <div style={{ display: "flex", gap: "12px", flexWrap: "wrap" }}>
+              <button
+                onClick={refreshInventoryFromTableau}
+                disabled={refreshingInventory}
+                style={{ background: refreshingInventory ? "#6b7280" : "#111827", color: "white", border: "none", borderRadius: "12px", padding: "12px 18px", fontWeight: 600, cursor: refreshingInventory ? "wait" : "pointer" }}
+              >
+                {refreshingInventory ? "Refreshing..." : "Refresh Inventory from Tableau"}
+              </button>
+              {!inventoryLocked && (
+                <button
+                  onClick={() => setShowLockInventoryModal(true)}
+                  style={{ background: "#047857", color: "white", border: "none", borderRadius: "12px", padding: "12px 18px", fontWeight: 600, cursor: "pointer" }}
+                >
+                  Lock Inventory Plan
+                </button>
+              )}
+              {inventoryLocked && (
+                <div style={{ display: "inline-flex", alignItems: "center", gap: "8px", background: "#ecfdf5", color: "#065f46", border: "1px solid #a7f3d0", borderRadius: "12px", padding: "12px 18px", fontWeight: 600 }}>
+                  Inventory Plan Locked — {formatLockedAt(planWorkflow.inventoryLockedAt!)}
+                </div>
+              )}
+            </div>
+          </div>
         </div>
 
-        <div style={{...filterCardStyle, display: 'flex', justifyContent: 'space-between', alignItems: 'center'}}>
-            <div>
-                <h3 style={{ margin: 0, fontSize: "16px", fontWeight: 700 }}>Global Target Service Level</h3>
-                <p style={{ margin: 0, color: "#6b7280", fontSize: "13px" }}>Recalculates safety stock targets for ALL products.</p>
-            </div>
-            <select value={globalServiceLevel} disabled={!!planWorkflow.inventoryLockedAt} onChange={(e) => handleGlobalSLChange(Number(e.target.value))} style={{...selectStyle, width: '200px', fontWeight: 'bold', cursor: planWorkflow.inventoryLockedAt ? 'not-allowed' : 'pointer', background: planWorkflow.inventoryLockedAt ? '#f3f4f6' : undefined }}>
-                <option value={85}>85% - Lean</option>
-                <option value={90}>90% - Moderate</option>
-                <option value={95}>95% - Standard</option>
-                <option value={99}>99% - Conservative</option>
-            </select>
+        <div style={{...filterCardStyle, display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '16px', flexWrap: 'wrap'}}>
+          <div>
+            <h3 style={{ margin: 0, fontSize: "16px", fontWeight: 700 }}>Target Service Level</h3>
+            <p style={{ margin: "4px 0 0 0", color: "#6b7280", fontSize: "13px" }}>Recalculates safety stock targets for all products.</p>
+            <p style={{ margin: "6px 0 0 0", color: inventoryRefreshError ? "#b91c1c" : "#6b7280", fontSize: "12px", fontWeight: inventoryRefreshError ? 700 : 500 }}>
+              {inventoryRefreshError
+                ? `Tableau refresh failed: ${inventoryRefreshError}`
+                : inventoryLastRefreshedAt
+                  ? `Tableau inventory refreshed ${formatLockedAt(inventoryLastRefreshedAt)}`
+                  : "Tableau inventory has not been manually refreshed in this session."}
+            </p>
+          </div>
+          <select
+            value={globalServiceLevel}
+            disabled={inventoryLocked}
+            onChange={(e) => handleGlobalSLChange(Number(e.target.value) as RevisedServiceLevel)}
+            style={{...selectStyle, width: '200px', fontWeight: 'bold', cursor: inventoryLocked ? 'not-allowed' : 'pointer', background: inventoryLocked ? '#f3f4f6' : undefined}}
+          >
+            {REVISED_SERVICE_LEVELS.map((level) => (
+              <option key={level} value={level}>{level}%</option>
+            ))}
+          </select>
         </div>
 
         <div style={tableCardStyle}>
           <div style={{ overflowX: "auto" }}>
-            <table style={{ width: "100%", minWidth: "900px", borderCollapse: "collapse" }}>
-                <thead>
-                    <tr style={{ background: "#f8fafc" }}>
-                        <th style={{ textAlign: "left", padding: "14px 16px", borderBottom: "1px solid #e5e7eb", fontSize: "13px", fontWeight: 700, color: "#374151" }}>Brand</th>
-                        <th style={{ textAlign: "center", padding: "14px 16px", borderBottom: "1px solid #e5e7eb", fontSize: "13px", fontWeight: 700, color: "#374151" }}>Starting Inv</th>
-                        <th style={{ textAlign: "center", padding: "14px 16px", borderBottom: "1px solid #e5e7eb", fontSize: "13px", fontWeight: 700, color: "#9ca3af" }}>Avg Demand</th>
-                        <th style={{ textAlign: "center", padding: "14px 16px", borderBottom: "1px solid #e5e7eb", fontSize: "13px", fontWeight: 700, color: "#2563eb" }}>Calculated SS</th>
-                        <th style={{ textAlign: "center", padding: "14px 16px", borderBottom: "1px solid #e5e7eb", fontSize: "13px", fontWeight: 700, color: "#7e22ce", background: "#f3e8ff" }}>Desired Safety Stock</th>
+            <table style={{ width: "100%", minWidth: "1000px", borderCollapse: "collapse" }}>
+              <thead>
+                <tr style={{ background: "#f8fafc" }}>
+                  <th style={{ textAlign: "left", padding: "14px 16px", borderBottom: "1px solid #e5e7eb", fontSize: "13px", fontWeight: 700, color: "#374151" }}>Brand</th>
+                  <th style={{ textAlign: "center", padding: "14px 16px", borderBottom: "1px solid #e5e7eb", fontSize: "13px", fontWeight: 700, color: "#374151" }}>Starting Inv</th>
+                  <th style={{ textAlign: "center", padding: "14px 16px", borderBottom: "1px solid #e5e7eb", fontSize: "13px", fontWeight: 700, color: "#9ca3af" }}>Std Dev Lookback</th>
+                  <th style={{ textAlign: "center", padding: "14px 16px", borderBottom: "1px solid #e5e7eb", fontSize: "13px", fontWeight: 700, color: "#9ca3af" }}>Std Dev</th>
+                  <th style={{ textAlign: "center", padding: "14px 16px", borderBottom: "1px solid #e5e7eb", fontSize: "13px", fontWeight: 700, color: "#2563eb" }}>Calculated SS</th>
+                  <th style={{ textAlign: "center", padding: "14px 16px", borderBottom: "1px solid #e5e7eb", fontSize: "13px", fontWeight: 700, color: "#7e22ce", background: "#f3e8ff" }}>Desired Safety Stock</th>
+                  <th style={{ textAlign: "center", padding: "14px 16px", borderBottom: "1px solid #e5e7eb", fontSize: "13px", fontWeight: 700, color: "#9ca3af" }}>Avg Demand</th>
+                </tr>
+              </thead>
+              <tbody>
+                {enrichedInventoryDB.map((item, index) => {
+                  const safetyStats = revisedSafetyStatsByProduct[item.name] || { lookbackWeeks: 13, stdDev: 0 };
+                  const calcSS = Number((safetyStats.stdDev * REVISED_SAFETY_FACTORS[globalServiceLevel]).toFixed(2));
+                  const isSSAudited = item.finalSS !== calcSS;
+                  const isInvAudited = item.startInv !== item.originalStartInv;
+
+                  return (
+                    <tr key={item.name} style={{ background: index % 2 === 0 ? "white" : "#fcfcfd" }}>
+                      <td style={{...cellStyle, fontWeight: 'bold'}}>{item.name}</td>
+                      <td style={{...cellStyle, textAlign: 'center'}}>
+                        <input
+                          key={`inv-${item.name}-${item.startInv}-${cancelTick}`}
+                          type="number"
+                          defaultValue={item.startInv}
+                          disabled={inventoryLocked}
+                          onBlur={(e) => {
+                            if (inventoryLocked) return;
+                            if (e.target.value !== "" && Number(e.target.value) !== item.startInv) {
+                              handleInventoryUpdate(item.name, 'startInv', e.target.value);
+                            }
+                          }}
+                          style={{
+                            ...inputStyle,
+                            textAlign: 'center',
+                            background: isInvAudited ? '#fef3c7' : '#f8fafc',
+                            border: isInvAudited ? '2px solid #f59e0b' : '1px solid #d1d5db',
+                            color: isInvAudited ? '#b45309' : '#111827',
+                            fontWeight: isInvAudited ? 'bold' : 'normal'
+                          }}
+                        />
+                      </td>
+                      <td style={{...cellStyle, textAlign: "center", color: "#6b7280"}}>{safetyStats.lookbackWeeks} wks</td>
+                      <td style={{...cellStyle, textAlign: "center", color: "#6b7280"}}>{formatNumber(safetyStats.stdDev)}</td>
+                      <td style={{...cellStyle, textAlign: 'center', color: '#2563eb', fontWeight: 'bold'}}>{formatNumber(calcSS)}</td>
+                      <td style={{...cellStyle, textAlign: 'center', background: '#f3e8ff'}}>
+                        <input
+                          key={`ss-${item.name}-${item.finalSS}-${cancelTick}`}
+                          type="number"
+                          defaultValue={item.finalSS}
+                          disabled={inventoryLocked}
+                          onBlur={(e) => {
+                            if (inventoryLocked) return;
+                            if (e.target.value !== "" && Number(e.target.value) !== item.finalSS) {
+                              handleInventoryUpdate(item.name, 'finalSS', e.target.value);
+                            }
+                          }}
+                          style={{...inputStyle, textAlign: 'center', fontWeight: 'bold', color: isSSAudited ? '#b45309' : '#7e22ce', border: isSSAudited ? '2px solid #f59e0b' : '1px solid #d1d5db'}}
+                        />
+                      </td>
+                      <td style={{...cellStyle, textAlign: 'center', color: '#6b7280'}}>{formatNumber(item.avgDemand)}</td>
                     </tr>
-                </thead>
-                <tbody>
-                    {enrichedInventoryDB.map((item, index) => {
-                        const calcSS = item.baseSafetyStock * getZRatio(globalServiceLevel);
-                        const isSSAudited = item.finalSS !== Number(calcSS.toFixed(2));
-                        const isInvAudited = item.startInv !== item.originalStartInv;
-
-                        return (
-                            <tr key={item.name} style={{ background: index % 2 === 0 ? "white" : "#fcfcfd" }}>
-                                <td style={{...cellStyle, fontWeight: 'bold'}}>{item.name}</td>
-
-                                <td style={{...cellStyle, textAlign: 'center'}}>
-                                    <input
-                                        key={`inv-${item.name}-${item.startInv}-${cancelTick}`}
-                                        type="number"
-                                        defaultValue={item.startInv}
-                                        disabled={!!planWorkflow.inventoryLockedAt}
-                                        onBlur={(e) => {
-                                            if (planWorkflow.inventoryLockedAt) return;
-                                            if (e.target.value !== "" && Number(e.target.value) !== item.startInv) {
-                                                handleInventoryUpdate(item.name, 'startInv', e.target.value);
-                                            }
-                                        }}
-                                        style={{
-                                            ...inputStyle,
-                                            textAlign: 'center',
-                                            background: isInvAudited ? '#fef3c7' : '#f8fafc',
-                                            border: isInvAudited ? '2px solid #f59e0b' : '1px solid #d1d5db',
-                                            color: isInvAudited ? '#b45309' : '#111827',
-                                            fontWeight: isInvAudited ? 'bold' : 'normal'
-                                        }}
-                                    />
-                                </td>
-
-                                <td style={{...cellStyle, textAlign: 'center', color: '#6b7280'}}>{formatNumber(item.avgDemand)}</td>
-                                <td style={{...cellStyle, textAlign: 'center', color: '#2563eb', fontWeight: 'bold'}}>{formatNumber(calcSS)}</td>
-                                <td style={{...cellStyle, textAlign: 'center', background: '#f3e8ff'}}>
-                                    <input
-                                        key={`ss-${item.name}-${item.finalSS}-${cancelTick}`}
-                                        type="number"
-                                        defaultValue={item.finalSS}
-                                        disabled={!!planWorkflow.inventoryLockedAt}
-                                        onBlur={(e) => {
-                                            if (planWorkflow.inventoryLockedAt) return;
-                                            if (e.target.value !== "" && Number(e.target.value) !== item.finalSS) {
-                                                handleInventoryUpdate(item.name, 'finalSS', e.target.value);
-                                            }
-                                        }}
-                                        style={{...inputStyle, textAlign: 'center', fontWeight: 'bold', color: isSSAudited ? '#b45309' : '#7e22ce', border: isSSAudited ? '2px solid #f59e0b' : '1px solid #d1d5db'}}
-                                    />
-                                </td>
-                            </tr>
-                        )
-                    })}
-                </tbody>
+                  );
+                })}
+              </tbody>
             </table>
           </div>
         </div>
@@ -1398,124 +1366,6 @@ export default function Home() {
             </div>
           </div>
         )}
-      </div>
-    );
-  }
-
-  function renderRevisedInventoryTab() {
-    return (
-      <div style={{ display: "flex", flexDirection: "column", gap: "20px" }}>
-        <div style={chartCardStyle}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: "16px", flexWrap: "wrap" }}>
-            <div>
-              <h2 style={{ margin: 0, fontSize: "28px", fontWeight: 700 }}>Revised Inventory Plan</h2>
-              <p style={{ marginTop: "8px", marginBottom: 0, color: "#6b7280" }}>
-                Scratchpad for redesigning inventory logic. Refresh pulls current Tableau inventory; draft edits stay local and do not update Tableau, Supabase, or the current Inventory tab.
-              </p>
-            </div>
-            <div style={{ display: "flex", gap: "12px", flexWrap: "wrap", justifyContent: "flex-end" }}>
-              <button
-                onClick={refreshRevisedInventoryFromTableau}
-                disabled={refreshingInventory}
-                style={{ background: refreshingInventory ? "#6b7280" : "#111827", color: "white", border: "none", borderRadius: "12px", padding: "10px 16px", fontWeight: 600, cursor: refreshingInventory ? "wait" : "pointer" }}
-              >
-                {refreshingInventory ? "Refreshing..." : "Refresh from Tableau"}
-              </button>
-              <button
-                onClick={() => { setRevisedInventoryDraft({}); setRevisedPortfolioServiceLevel(95); }}
-                style={{ background: "white", color: "#111827", border: "1px solid #d1d5db", borderRadius: "12px", padding: "10px 16px", fontWeight: 600, cursor: "pointer" }}
-              >
-                Reset Draft
-              </button>
-            </div>
-          </div>
-        </div>
-
-        <div style={{...filterCardStyle, display: "flex", justifyContent: "space-between", alignItems: "center", gap: "16px", flexWrap: "wrap" }}>
-          <div>
-            <h3 style={{ margin: 0, fontSize: "16px", fontWeight: 700 }}>Target Service Level</h3>
-            <p style={{ margin: "4px 0 0 0", color: "#6b7280", fontSize: "13px" }}>
-              Recalculates safety stock targets for ALL products.
-            </p>
-            <p style={{ margin: "6px 0 0 0", color: inventoryRefreshError ? "#b91c1c" : "#6b7280", fontSize: "12px", fontWeight: inventoryRefreshError ? 700 : 500 }}>
-              {inventoryRefreshError
-                ? `Tableau refresh failed: ${inventoryRefreshError}`
-                : inventoryLastRefreshedAt
-                  ? `Tableau inventory refreshed ${formatLockedAt(inventoryLastRefreshedAt)}`
-                  : "Tableau inventory has not been manually refreshed in this session."}
-            </p>
-          </div>
-          <select
-            value={revisedPortfolioServiceLevel}
-            onChange={(e) => updateRevisedPortfolioServiceLevel(Number(e.target.value) as RevisedServiceLevel)}
-            style={{...selectStyle, width: "180px", fontWeight: 700}}
-          >
-            {REVISED_SERVICE_LEVELS.map((level) => (
-              <option key={level} value={level}>{level}%</option>
-            ))}
-          </select>
-        </div>
-
-        <div style={tableCardStyle}>
-          <div style={{ padding: "20px 24px", borderBottom: "1px solid #e5e7eb" }}>
-            <h3 style={{ margin: 0, fontSize: "18px", fontWeight: 700 }}>Draft Inventory Inputs</h3>
-            <p style={{ margin: "4px 0 0 0", color: "#6b7280", fontSize: "13px" }}>
-              WIP is beer already started in tank. The revised brew plan treats it as a scheduled receipt, not as starting inventory for new brew decisions.
-            </p>
-          </div>
-          <div style={{ overflowX: "auto" }}>
-            <table style={{ width: "100%", minWidth: "1180px", borderCollapse: "collapse" }}>
-              <thead>
-                <tr style={{ background: "#f8fafc" }}>
-                  <th style={{ textAlign: "left", padding: "14px 16px", borderBottom: "1px solid #e5e7eb", fontSize: "13px" }}>Brand</th>
-                  <th style={{ textAlign: "center", padding: "14px 16px", borderBottom: "1px solid #e5e7eb", fontSize: "13px" }}>Total Tableau Inv</th>
-                  <th style={{ textAlign: "center", padding: "14px 16px", borderBottom: "1px solid #e5e7eb", fontSize: "13px" }}>WIP Already in Tank</th>
-                  <th style={{ textAlign: "center", padding: "14px 16px", borderBottom: "1px solid #e5e7eb", fontSize: "13px" }}>Draft Starting Inv</th>
-                  <th style={{ textAlign: "center", padding: "14px 16px", borderBottom: "1px solid #e5e7eb", fontSize: "13px" }}>Std Dev Lookback</th>
-                  <th style={{ textAlign: "center", padding: "14px 16px", borderBottom: "1px solid #e5e7eb", fontSize: "13px" }}>Std Dev</th>
-                  <th style={{ textAlign: "center", padding: "14px 16px", borderBottom: "1px solid #e5e7eb", fontSize: "13px" }}>Calculated Safety Stock</th>
-                  <th style={{ textAlign: "center", padding: "14px 16px", borderBottom: "1px solid #e5e7eb", fontSize: "13px" }}>Draft Safety Stock</th>
-                  <th style={{ textAlign: "center", padding: "14px 16px", borderBottom: "1px solid #e5e7eb", fontSize: "13px" }}>Avg Demand</th>
-                </tr>
-              </thead>
-              <tbody>
-                {enrichedInventoryDB.map((item, index) => {
-                  const safetyStats = revisedSafetyStatsByProduct[item.name] || { lookbackWeeks: 13, stdDev: 0 };
-                  const calculatedSafetyStock = getCalculatedRevisedSafetyStock(item.name);
-                  const wipInventory = revisedWipByProduct[item.name] ?? 0;
-                  const defaultStartingInventory = getDefaultRevisedStartingInventory(item.name);
-                  return (
-                    <tr key={item.name} style={{ background: index % 2 === 0 ? "white" : "#fcfcfd" }}>
-                      <td style={{...cellStyle, fontWeight: 700}}>{item.name}</td>
-                      <td style={{...cellStyle, textAlign: "center", color: "#6b7280"}}>{formatNumber(item.startInv)}</td>
-                      <td style={{...cellStyle, textAlign: "center", color: wipInventory > 0 ? "#047857" : "#9ca3af", fontWeight: wipInventory > 0 ? 800 : 500}}>{wipInventory > 0 ? formatNumber(wipInventory) : "-"}</td>
-                      <td style={{...cellStyle, textAlign: "center"}}>
-                        <input
-                          type="number"
-                          value={revisedInventoryDraft[item.name]?.startInv ?? String(defaultStartingInventory)}
-                          onChange={(e) => updateRevisedInventoryDraft(item.name, "startInv", e.target.value)}
-                          style={{...inputStyle, textAlign: "center"}}
-                        />
-                      </td>
-                      <td style={{...cellStyle, textAlign: "center", color: "#6b7280"}}>{safetyStats.lookbackWeeks} wks</td>
-                      <td style={{...cellStyle, textAlign: "center", color: "#6b7280"}}>{formatNumber(safetyStats.stdDev)}</td>
-                      <td style={{...cellStyle, textAlign: "center", color: "#7e22ce", fontWeight: 700}}>{formatNumber(calculatedSafetyStock)}</td>
-                      <td style={{...cellStyle, textAlign: "center"}}>
-                        <input
-                          type="number"
-                          value={revisedInventoryDraft[item.name]?.finalSS ?? String(calculatedSafetyStock)}
-                          onChange={(e) => updateRevisedInventoryDraft(item.name, "finalSS", e.target.value)}
-                          style={{...inputStyle, textAlign: "center"}}
-                        />
-                      </td>
-                      <td style={{...cellStyle, textAlign: "center", color: "#6b7280"}}>{formatNumber(item.avgDemand)}</td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-        </div>
       </div>
     );
   }
@@ -2206,7 +2056,6 @@ export default function Home() {
             {activeTab === "Overview" && renderOverviewTab()}
             {activeTab === "Forecasted Demand" && renderDemandPlanTab()}
             {activeTab === "Inventory" && renderInventoryTab()}
-            {activeTab === "Revised Inventory Plan" && renderRevisedInventoryTab()}
             {activeTab === "Brewing Plan" && renderBrewingTab()}
             {activeTab === "Packaging Plan" && renderPackagingTab()}
           </>

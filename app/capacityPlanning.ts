@@ -38,6 +38,11 @@ export function generateCapacityPlan(
     const grossRequirements: number[] = [];
     let priorAvailable = startInv;
 
+    // Skip auto-recommended brews entirely for products with no forecasted demand
+    // (e.g. The Roustabout) — top-up brews are wasteful when no one is drinking it.
+    const horizonForecastTotal = forecasts.slice(0, internalHorizon).reduce((sum, value) => sum + (value || 0), 0);
+    const hasNoDemand = horizonForecastTotal <= 0;
+
     for (let i = 0; i < internalHorizon; i++) {
         const gross = forecasts[i] || 0;
         const isManualReceipt = manualReleases[i - leadTimeWeeks] !== undefined;
@@ -48,7 +53,7 @@ export function generateCapacityPlan(
         let receipt = 0;
         if (isManualReceipt) {
             receipt = manualReleases[i - leadTimeWeeks];
-        } else {
+        } else if (!hasNoDemand) {
             net = Math.max(0, gross + safetyStock - priorAvailable);
             receipt = net > 0 ? Math.ceil(net / batchSize) * batchSize : 0;
         }
