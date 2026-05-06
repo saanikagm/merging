@@ -176,6 +176,31 @@ function getInventoryVolume(record: Record<string, unknown>): number {
   ]));
 }
 
+function getZRatio(serviceLevel: number): number {
+  if (serviceLevel === 99) return 2.33 / 1.645;
+  if (serviceLevel === 95) return 1.0;
+  if (serviceLevel === 90) return 1.28 / 1.645;
+  if (serviceLevel === 85) return 1.04 / 1.645;
+  return 1.0;
+}
+
+function csvEscape(value: unknown): string {
+  const s = value == null ? "" : String(value);
+  return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+}
+
+function downloadCsvFile(filename: string, lines: string[]) {
+  const blob = new Blob([lines.join("\n")], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
 function getNextMonday(fromDate = new Date()) {
   const date = new Date(fromDate);
   const day = date.getDay();
@@ -968,9 +993,8 @@ export default function Home() {
     return { name: selectedOpsProduct, forecasts: wf, startInv: inv.startInv, finalSS: inv.finalSS, manualReleases: manualBrewPlan[selectedOpsProduct] || {} };
   }, [productLevelRows, selectedOpsProduct, inventoryDB, manualBrewPlan]);
 
-  const packagingPlan = useMemo(() => {
-    if (!brewPlanResult || !selectedOpsProduct) return [];
-
+  const packagingPlanResult = useMemo(() => {
+    if (!brewPlanResult) return null;
     const packagingDemand = mapPackagingDemand(
       rows.map((r) => ({ brand: r.brand, packaging_format: r.packaging_format, week_number: r.week_number, previous_value: r.previous_value, effective_value: r.effective_value })),
       weekStartDates,
@@ -987,8 +1011,7 @@ export default function Home() {
     const bblPerUnitByFormat = Object.fromEntries(
       Object.entries(PACKAGING_CONVERSIONS).map(([format, conv]) => [format, conv.bblPerUnit]),
     );
-
-    const result = generatePackagingPlan({
+    return generatePackagingPlan({
       brewPlan: brewPlanResult,
       packagingDemand,
       packagingHistory,
@@ -996,6 +1019,11 @@ export default function Home() {
       bblPerUnitByFormat,
       serviceLevelByProduct: Object.fromEntries(products.map((p) => [p, globalServiceLevel])) as Record<string, ServiceLevel>,
     });
+  }, [brewPlanResult, rows, packagingInventoryDB, historicalRows, weekStartDates, products, globalServiceLevel]);
+
+  const packagingPlan = useMemo(() => {
+    if (!packagingPlanResult || !selectedOpsProduct) return [];
+    const result = packagingPlanResult;
 
     const productRows = result.packagingPlan.filter((r) => r.product_id === selectedOpsProduct);
     const summaries = result.weeklySummary.filter((s) => s.product_id === selectedOpsProduct);
@@ -1040,7 +1068,7 @@ export default function Home() {
         rows: detailRows,
       };
     });
-  }, [brewPlanResult, rows, packagingInventoryDB, historicalRows, selectedOpsProduct, weekLabels, weekStartDates, products, globalServiceLevel]);
+  }, [packagingPlanResult, selectedOpsProduct, weekLabels, weekStartDates]);
 
 
   const handleGlobalSLChange = (newSL: RevisedServiceLevel) => {
@@ -1073,11 +1101,7 @@ export default function Home() {
     const headers = demandViewLevel === "product"
       ? ["Brand", ...weekHeaders]
       : ["Brand", "Channel", "Packaging", ...weekHeaders];
-    const escape = (v: unknown) => {
-      const s = v == null ? "" : String(v);
-      return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-    };
-    const lines = [headers.map(escape).join(",")];
+    const lines = [headers.map(csvEscape).join(",")];
     pivotRows.forEach((row) => {
       const cells = demandViewLevel === "product"
         ? [row.brand]
@@ -1091,17 +1115,120 @@ export default function Home() {
           cells.push(converted.toFixed(4));
         }
       });
-      lines.push(cells.map(escape).join(","));
+      lines.push(cells.map(csvEscape).join(","));
     });
-    const blob = new Blob([lines.join("\n")], { type: "text/csv;charset=utf-8;" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `demand-plan-${demandViewLevel}-${unitMode.toLowerCase()}-${new Date().toISOString().slice(0, 10)}.csv`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
+    downloadCsvFile(
+      `demand-plan-${demandViewLevel}-${unitMode.toLowerCase()}-${new Date().toISOString().slice(0, 10)}.csv`,
+      lines,
+    );
+  }
+
+  function downloadOverviewCsv() {
+    const yearKeys = yearlyComparisonChart.years.map(String);
+    const headers = ["Week of Year", ...yearKeys.map((y) => `${y} BBL`)];
+    const lines = [headers.map(csvEscape).join(",")];
+    yearlyComparisonChart.data.forEach((row) => {
+      const cells: (string | number)[] = [Number(row.week)];
+      yearKeys.forEach((y) => {
+        const v = row[y];
+        cells.push(v == null ? "" : Number(v).toFixed(4));
+      });
+      lines.push(cells.map(csvEscape).join(","));
+    });
+    downloadCsvFile(`overview-yearly-demand-${new Date().toISOString().slice(0, 10)}.csv`, lines);
+  }
+
+  function downloadInventoryCsv() {
+    const zRatio = getZRatio(globalServiceLevel);
+    const headers = [
+      "Product",
+      "Starting Inventory (BBL)",
+      "Avg Weekly Demand (BBL)",
+      "Calculated Safety Stock (BBL)",
+      "Audited Safety Stock (BBL)",
+      "Service Level (%)",
+      "Audit Reason",
+    ];
+    const lines = [headers.map(csvEscape).join(",")];
+    enrichedInventoryDB.forEach((item) => {
+      const calculatedSS = (item.baseSafetyStock ?? 0) * zRatio;
+      const cells = [
+        item.name,
+        Number(item.startInv ?? 0).toFixed(4),
+        Number(item.avgDemand ?? 0).toFixed(4),
+        Number(calculatedSS).toFixed(4),
+        Number(item.finalSS ?? 0).toFixed(4),
+        globalServiceLevel,
+        (item as { auditReason?: string }).auditReason ?? "",
+      ];
+      lines.push(cells.map(csvEscape).join(","));
+    });
+    downloadCsvFile(
+      `inventory-${globalServiceLevel}sl-${new Date().toISOString().slice(0, 10)}.csv`,
+      lines,
+    );
+  }
+
+  function downloadBrewingCsv() {
+    if (!brewPlanResult) return;
+    const headers = [
+      "Product",
+      "Week Start Date",
+      "Forecast (BBL)",
+      "Starting Inventory (BBL)",
+      "Safety Stock (BBL)",
+      "Service Level (%)",
+      "Scheduled Receipts (BBL)",
+      "Net Requirement (BBL)",
+      "Planned Receipt (BBL)",
+      "Planned Release (BBL)",
+      "Projected Available (BBL)",
+      "Capacity Status",
+      "Notes",
+    ];
+    const lines = [headers.map(csvEscape).join(",")];
+    brewPlanResult.productLevelBrewPlan.forEach((row) => {
+      const cells = [
+        row.product_name,
+        row.week_start_date,
+        Number(row.forecast_barrels).toFixed(4),
+        Number(row.starting_inventory).toFixed(4),
+        Number(row.safety_stock).toFixed(4),
+        row.service_level,
+        Number(row.scheduled_receipts).toFixed(4),
+        Number(row.net_requirement).toFixed(4),
+        Number(row.planned_order_receipt).toFixed(4),
+        Number(row.planned_order_release).toFixed(4),
+        Number(row.projected_available).toFixed(4),
+        row.capacity_status,
+        row.notes,
+      ];
+      lines.push(cells.map(csvEscape).join(","));
+    });
+    downloadCsvFile(`brewing-plan-${new Date().toISOString().slice(0, 10)}.csv`, lines);
+  }
+
+  function downloadPackagingCsv() {
+    if (!packagingPlanResult) return;
+    const headers = ["Product", "PackagingType", "Item", "Quantity", "Volume", "Week Start Date"];
+    const lines = [headers.map(csvEscape).join(",")];
+    packagingPlanResult.packagingPlan
+      .filter((row) => row.package_units > 0)
+      .forEach((row) => {
+        const cells = [
+          row.product_name,
+          row.packaging_format,
+          `${row.product_name} (${row.packaging_format})`,
+          Number(row.package_units).toFixed(14),
+          Number(row.allocated_bbl).toFixed(14),
+          row.week_start_date,
+        ];
+        lines.push(cells.map(csvEscape).join(","));
+      });
+    const pad = (n: number) => String(n).padStart(2, "0");
+    const d = new Date();
+    const ts = `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
+    downloadCsvFile(`planned_production_${ts}.csv`, lines);
   }
 
   async function savePendingEdit() {
@@ -1145,11 +1272,21 @@ export default function Home() {
     return (
       <div style={{ display: "flex", flexDirection: "column", gap: "20px" }}>
         <div style={chartCardStyle}>
-          <h2 style={{ margin: 0, fontSize: "28px", fontWeight: 700 }}>Overview</h2>
-          <p style={{ marginTop: "8px", marginBottom: 0, color: "#6b7280" }}>Snapshot of the current demand forecast and effective demand plan.</p>
-          <p style={{ marginTop: "12px", marginBottom: 0, color: "#9ca3af", fontSize: "12px" }}>
-            Forecast last generated: {latestForecastDate || "—"} · Inventory last refreshed: pulled live from Tableau on page load
-          </p>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: "16px", flexWrap: "wrap" }}>
+            <div>
+              <h2 style={{ margin: 0, fontSize: "28px", fontWeight: 700 }}>Overview</h2>
+              <p style={{ marginTop: "8px", marginBottom: 0, color: "#6b7280" }}>Snapshot of the current demand forecast and effective demand plan.</p>
+              <p style={{ marginTop: "12px", marginBottom: 0, color: "#9ca3af", fontSize: "12px" }}>
+                Forecast last generated: {latestForecastDate || "—"} · Inventory last refreshed: pulled live from Tableau on page load
+              </p>
+            </div>
+            <button
+              onClick={downloadOverviewCsv}
+              style={{ background: "white", color: "#111827", border: "1px solid #d1d5db", borderRadius: "10px", padding: "8px 14px", fontWeight: 600, fontSize: "13px", cursor: "pointer" }}
+            >
+              Download CSV
+            </button>
+          </div>
         </div>
         <div style={overviewGridStyle}>
           <div style={overviewLeftColumnStyle}>
@@ -1222,6 +1359,12 @@ export default function Home() {
               </p>
             </div>
             <div style={{ display: "flex", gap: "12px", flexWrap: "wrap" }}>
+              <button
+                onClick={downloadInventoryCsv}
+                style={{ background: "white", color: "#111827", border: "1px solid #d1d5db", borderRadius: "12px", padding: "12px 18px", fontWeight: 600, cursor: "pointer" }}
+              >
+                Download CSV
+              </button>
               <button
                 onClick={refreshInventoryFromTableau}
                 disabled={refreshingInventory}
@@ -1411,6 +1554,21 @@ export default function Home() {
                     {masterSchedule.hasWarning && <p style={{ color: "#f87171", fontSize: "14px", marginTop: "8px", margin: 0, fontWeight: "bold" }}>⚠️ WARNING: Approaching absolute limit of {MAX_CAPACITY} bbls.</p>}
                 </div>
                 <div style={{ display: "flex", alignItems: "center", gap: "12px", flexWrap: "wrap", justifyContent: "flex-end" }}>
+                    <button
+                      onClick={downloadBrewingCsv}
+                      style={{
+                        background: "white",
+                        color: "#111827",
+                        border: "1px solid #475569",
+                        borderRadius: "10px",
+                        padding: "10px 14px",
+                        fontWeight: 700,
+                        fontSize: "13px",
+                        cursor: "pointer",
+                      }}
+                    >
+                      Download CSV
+                    </button>
                     <button
                       onClick={refreshInventoryFromTableau}
                       disabled={refreshingInventory}
@@ -1641,10 +1799,20 @@ export default function Home() {
     return (
       <div style={{ display: "flex", flexDirection: "column", gap: "20px" }}>
         <div style={chartCardStyle}>
-            <h2 style={{ margin: 0, fontSize: "28px", fontWeight: 700 }}>Packaging Plan</h2>
-            <p style={{ marginTop: "8px", marginBottom: 0, color: "#6b7280" }}>
-              Converts beer ready from the Brewing Plan into whole-unit package work orders. Math stays in BBL; the operator view shows units.
-            </p>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: "16px", flexWrap: "wrap" }}>
+            <div>
+              <h2 style={{ margin: 0, fontSize: "28px", fontWeight: 700 }}>Packaging Plan</h2>
+              <p style={{ marginTop: "8px", marginBottom: 0, color: "#6b7280" }}>
+                Converts beer ready from the Brewing Plan into whole-unit package work orders. Math stays in BBL; the operator view shows units.
+              </p>
+            </div>
+            <button
+              onClick={downloadPackagingCsv}
+              style={{ background: "white", color: "#111827", border: "1px solid #d1d5db", borderRadius: "10px", padding: "8px 14px", fontWeight: 600, fontSize: "13px", cursor: "pointer" }}
+            >
+              Download CSV
+            </button>
+          </div>
         </div>
 
         <div style={filterCardStyle}>
