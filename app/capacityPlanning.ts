@@ -1,60 +1,78 @@
-export function generateCapacityPlan(name: string, forecasts: number[], startInv: number, safetyStock: number, manualReleases: Record<number, number> = {}) {
-    let projAvailable = [];
-    let plannedReceipt = [];
-    let plannedRelease = [];
+export type CapacityPlanResult = {
+    productName: string;
+    totalForecast: number;
+    avgWeeklyDemand: number;
+    startInv: number;
+    safetyStock: number;
+    forecasts: number[];
+    projAvailable: number[];
+    plannedReceipt: number[];
+    plannedRelease: number[];
+    netRequirements: number[];
+    grossRequirements: number[];
+    startingInventoryByWeek: number[];
+    batchSize: number;
+    leadTimeWeeks: number;
+    pastDueReceipts: number;
+    displayWeeks: number;
+};
 
-    let currentInv = startInv;
+export function generateCapacityPlan(
+    name: string,
+    forecasts: number[],
+    startInv: number,
+    safetyStock: number,
+    manualReleases: Record<number, number> = {}
+): CapacityPlanResult {
+    // Revised MRP-style brewing logic: 50-BBL batch multiples, 2-week brewing offset,
+    // 8-week internal horizon so weeks 5-6 are correctly served by 2-week-ahead releases.
+    const internalHorizon = 8;
+    const displayWeeks = 6;
+    const leadTimeWeeks = 2;
+    const batchSize = 50;
 
-    // CHANGED: Lowered Lot Size to 25 BBLs based on professor feedback
-    // This creates a leaner inventory profile for slow-moving beers.
-    const batchSize = 25;
-    const leadTime = 2;
+    const plannedReceipt: number[] = [];
+    const projAvailable: number[] = [];
+    const netRequirements: number[] = [];
+    const startingInventoryByWeek: number[] = [];
+    const grossRequirements: number[] = [];
+    let priorAvailable = startInv;
 
-    for (let i = 0; i < 8; i++) {
-        let demand = forecasts[i] || 0;
-        let projectedInv = currentInv - demand;
+    for (let i = 0; i < internalHorizon; i++) {
+        const gross = forecasts[i] || 0;
+        const isManualReceipt = manualReleases[i - leadTimeWeeks] !== undefined;
+        startingInventoryByWeek.push(priorAvailable);
+        grossRequirements.push(gross);
+
+        let net = 0;
         let receipt = 0;
-
-        let isManual = manualReleases[i - leadTime] !== undefined;
-
-        if (isManual) {
-            receipt = manualReleases[i - leadTime];
+        if (isManualReceipt) {
+            receipt = manualReleases[i - leadTimeWeeks];
         } else {
-            if (projectedInv < safetyStock) {
-                let gap = safetyStock - projectedInv;
-                // Calculates how many 25 BBL batches are needed to cross the safety stock line
-                receipt = Math.ceil(gap / batchSize) * batchSize;
-            }
+            net = Math.max(0, gross + safetyStock - priorAvailable);
+            receipt = net > 0 ? Math.ceil(net / batchSize) * batchSize : 0;
         }
-
+        netRequirements.push(net);
         plannedReceipt.push(receipt);
-        currentInv = projectedInv + receipt;
-        projAvailable.push(currentInv);
+
+        const available = priorAvailable + receipt - gross;
+        projAvailable.push(available);
+        priorAvailable = available;
     }
 
-    // Aggregate any receipts that fall into the "past due" window
-    let pastDueBrews = 0;
-    for (let j = 0; j < leadTime; j++) {
-        pastDueBrews += plannedReceipt[j] || 0;
-    }
+    let pastDueReceipts = 0;
+    for (let j = 0; j < leadTimeWeeks; j++) pastDueReceipts += plannedReceipt[j] || 0;
 
-    for (let i = 0; i < 6; i++) {
-        let release = manualReleases[i] !== undefined ? manualReleases[i] : (plannedReceipt[i + leadTime] || 0);
-
-        // Force past-due brews into the immediate Week 0 "Start Brewing" schedule
-        if (i === 0 && manualReleases[i] === undefined) {
-            release += pastDueBrews;
-        }
-
+    const plannedRelease: number[] = [];
+    for (let i = 0; i < displayWeeks; i++) {
+        let release = manualReleases[i] !== undefined ? manualReleases[i] : (plannedReceipt[i + leadTimeWeeks] || 0);
+        if (i === 0 && manualReleases[i] === undefined) release += pastDueReceipts;
         plannedRelease.push(release);
     }
 
-    const displayForecasts = forecasts.slice(0, 6);
-    const displayAvailable = projAvailable.slice(0, 6);
-    const displayReceipts = plannedReceipt.slice(0, 6);
-
+    const displayForecasts = forecasts.slice(0, displayWeeks);
     const totalForecast = displayForecasts.reduce((a, b) => a + b, 0);
-    const avgWeeklyDemand = totalForecast / 6;
+    const avgWeeklyDemand = totalForecast / displayWeeks;
 
     return {
         productName: name,
@@ -63,8 +81,15 @@ export function generateCapacityPlan(name: string, forecasts: number[], startInv
         startInv,
         safetyStock,
         forecasts: displayForecasts,
-        projAvailable: displayAvailable,
-        plannedReceipt: displayReceipts,
-        plannedRelease
+        projAvailable: projAvailable.slice(0, displayWeeks),
+        plannedReceipt: plannedReceipt.slice(0, displayWeeks),
+        plannedRelease,
+        netRequirements: netRequirements.slice(0, displayWeeks),
+        grossRequirements: grossRequirements.slice(0, displayWeeks),
+        startingInventoryByWeek: startingInventoryByWeek.slice(0, displayWeeks),
+        batchSize,
+        leadTimeWeeks,
+        pastDueReceipts,
+        displayWeeks,
     };
 }
