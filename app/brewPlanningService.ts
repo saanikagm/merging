@@ -23,6 +23,9 @@ export type BrewPlanningInput = {
   maxCapacityBarrels?: number;
   productForecasts: ProductForecastInput[];
   priorPlanRows?: ProductLevelBrewPlanRow[];
+  manualReleasesByProduct?: Record<string, Record<number, number>>;
+  safetyStockOverrideByProduct?: Record<string, number>;
+  minWeeklyBrewByProduct?: Record<string, number>;
 };
 
 export type ProductLevelBrewPlanRow = {
@@ -143,7 +146,9 @@ export function generateBrewPlan(input: BrewPlanningInput): BrewPlanningResult {
   input.productForecasts.forEach((forecast) => {
     const serviceLevel = input.serviceLevelByProduct?.[forecast.product_id] ?? 95;
     const historicalDemand = input.historicalDemandByProduct[forecast.product_id] ?? [];
-    const { stdDev, safetyFactor, safetyStock } = calculateSafetyStock(historicalDemand, serviceLevel);
+    const { stdDev, safetyFactor, safetyStock: calculatedSafetyStock } = calculateSafetyStock(historicalDemand, serviceLevel);
+    const safetyStockOverride = input.safetyStockOverrideByProduct?.[forecast.product_id];
+    const safetyStock = safetyStockOverride ?? calculatedSafetyStock;
     const currentInventory = input.currentInventoryByProduct[forecast.product_id] ?? 0;
     const scheduledReceipts = input.scheduledReceiptsByProduct?.[forecast.product_id] ?? [];
     const horizonForecast = forecast.weeklyForecastBarrels.slice(0, planningHorizonWeeks);
@@ -157,6 +162,7 @@ export function generateBrewPlan(input: BrewPlanningInput): BrewPlanningResult {
       levelProjectedInventory.push(priorLevelProjectedInventory);
     }
 
+    const manualReleases = input.manualReleasesByProduct?.[forecast.product_id] ?? {};
     const plannedReceipts: number[] = Array(planningHorizonWeeks).fill(0);
     const projectedAvailable: number[] = [];
     const netRequirements: number[] = [];
@@ -165,8 +171,17 @@ export function generateBrewPlan(input: BrewPlanningInput): BrewPlanningResult {
     for (let weekIndex = 0; weekIndex < planningHorizonWeeks; weekIndex += 1) {
       const grossRequirements = valueAt(horizonForecast, weekIndex);
       const scheduledReceipt = valueAt(scheduledReceipts, weekIndex);
-      const netRequirement = Math.max(0, grossRequirements + safetyStock - priorProjectedAvailable - scheduledReceipt);
-      const plannedReceipt = roundUpToBatch(netRequirement, batchSizeBarrels);
+      const manualReleaseWeek = weekIndex - brewLeadTimeWeeks;
+      const manualReceiptValue = manualReleases[manualReleaseWeek];
+      let netRequirement: number;
+      let plannedReceipt: number;
+      if (manualReceiptValue !== undefined) {
+        netRequirement = 0;
+        plannedReceipt = manualReceiptValue;
+      } else {
+        netRequirement = Math.max(0, grossRequirements + safetyStock - priorProjectedAvailable - scheduledReceipt);
+        plannedReceipt = roundUpToBatch(netRequirement, batchSizeBarrels);
+      }
       const available = priorProjectedAvailable + scheduledReceipt + plannedReceipt - grossRequirements;
 
       netRequirements[weekIndex] = netRequirement;
@@ -180,10 +195,36 @@ export function generateBrewPlan(input: BrewPlanningInput): BrewPlanningResult {
       .reduce((sum, receipt) => sum + receipt, 0);
 
     const plannedReleases = plannedReceipts.map((_, weekIndex) => {
+      const manualValue = manualReleases[weekIndex];
+      if (manualValue !== undefined) return manualValue;
       const receiptIndex = weekIndex + brewLeadTimeWeeks;
       const release = plannedReceipts[receiptIndex] ?? 0;
       return weekIndex === 0 ? release + pastDueReceipts : release;
     });
+
+    const minWeeklyBrew = input.minWeeklyBrewByProduct?.[forecast.product_id] ?? 0;
+    if (minWeeklyBrew > 0) {
+      for (let weekIndex = 0; weekIndex < planningHorizonWeeks; weekIndex += 1) {
+        if (manualReleases[weekIndex] !== undefined) continue;
+        if (plannedReleases[weekIndex] < minWeeklyBrew) {
+          plannedReleases[weekIndex] = minWeeklyBrew;
+        }
+      }
+      for (let weekIndex = brewLeadTimeWeeks; weekIndex < planningHorizonWeeks; weekIndex += 1) {
+        const releaseWeek = weekIndex - brewLeadTimeWeeks;
+        if (manualReleases[releaseWeek] !== undefined) continue;
+        plannedReceipts[weekIndex] = plannedReleases[releaseWeek];
+      }
+      let priorAvail = currentInventory;
+      for (let weekIndex = 0; weekIndex < planningHorizonWeeks; weekIndex += 1) {
+        const gross = valueAt(horizonForecast, weekIndex);
+        const sched = valueAt(scheduledReceipts, weekIndex);
+        const recv = plannedReceipts[weekIndex];
+        const avail = priorAvail + sched + recv - gross;
+        projectedAvailable[weekIndex] = avail;
+        priorAvail = avail;
+      }
+    }
 
     for (let weekIndex = 0; weekIndex < planningHorizonWeeks; weekIndex += 1) {
       const receiptReleaseBeforeHorizon = weekIndex < brewLeadTimeWeeks && plannedReceipts[weekIndex] > 0;

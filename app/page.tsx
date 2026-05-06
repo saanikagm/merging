@@ -2,8 +2,21 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "@/lib/supabase";
-import { generateCapacityPlan } from './capacityPlanning';
-import { type ServiceLevel } from "./brewPlanningService";
+import { generateBrewPlan, type ProductLevelBrewPlanRow, type ServiceLevel } from "./brewPlanningService";
+import {
+  buildBrewPlanningInput,
+  buildHistoricalDemandByProduct,
+  buildWipByProduct,
+  computeDefaultMinWeeklyBrewByProduct,
+  computeImpliedWipByProduct,
+} from "./revisedBrewPlanMapper";
+import { generatePackagingPlan } from "./packagingPlanService";
+import {
+  collectProductPackagingPairs,
+  mapPackagingDemand,
+  mapPackagingHistory,
+  mapPackagingInventory,
+} from "./packagingPlanMapper";
 import {
   LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Legend,
 } from "recharts";
@@ -112,10 +125,6 @@ function convertBblTo(value: number, packaging: string, unit: "BBL" | "CE"): num
   if (unit === "BBL") return value;
   const ratio = CE_PER_BBL[packaging] ?? CE_PER_BBL_DEFAULT;
   return value * ratio;
-}
-
-function getBblPerUnit(packaging: string): number {
-  return PACKAGING_CONVERSIONS[packaging]?.bblPerUnit ?? 1;
 }
 
 function parseVolume(value: unknown): number {
@@ -669,6 +678,11 @@ export default function Home() {
   const filteredRows = useMemo(() => rows.filter((row) => (!productFilter || row.brand === productFilter) && (!channelFilter || row.channel === channelFilter) && (!packagingFilter || row.packaging_format === packagingFilter)), [rows, productFilter, channelFilter, packagingFilter]);
 
   const weekLabels = useMemo(() => Array.from({ length: 8 }, (_, i) => { const d = new Date(getNextMonday()); d.setDate(d.getDate() + i * 7); return formatWeekLabel(d); }), []);
+  const weekStartDates = useMemo(() => Array.from({ length: 8 }, (_, i) => { const d = new Date(getNextMonday()); d.setDate(d.getDate() + i * 7); return d.toISOString().slice(0, 10); }), []);
+
+  const BREW_DISPLAY_WEEKS = 6;
+  const BREW_LEAD_TIME_WEEKS = 2;
+  const BREW_BATCH_SIZE = 50;
 
   const chartData = useMemo(() => {
     const map: Record<number, { week: string; forecast: number; effective: number }> = {};
@@ -832,6 +846,13 @@ export default function Home() {
       if (!grouped[r.brand]) grouped[r.brand] = { brand: r.brand, Week1: 0, Week2: 0, Week3: 0, Week4: 0, Week5: 0, Week6: 0, Week7: 0, Week8: 0 };
       if (r.week_number >= 1 && r.week_number <= 8) (grouped[r.brand][`Week${r.week_number}` as keyof ProductLevelRow] as number) += getEffectiveOrForecast(r);
     });
+    const brandsWithAll = new Set(Object.keys(grouped));
+    rows.forEach((r) => {
+      if (r.packaging_format === "ALL") return;
+      if (brandsWithAll.has(r.brand)) return;
+      if (!grouped[r.brand]) grouped[r.brand] = { brand: r.brand, Week1: 0, Week2: 0, Week3: 0, Week4: 0, Week5: 0, Week6: 0, Week7: 0, Week8: 0 };
+      if (r.week_number >= 1 && r.week_number <= 8) (grouped[r.brand][`Week${r.week_number}` as keyof ProductLevelRow] as number) += getEffectiveOrForecast(r);
+    });
     return Object.values(grouped).sort((a, b) => a.brand.localeCompare(b.brand));
   }, [rows]);
 
@@ -876,8 +897,38 @@ export default function Home() {
   const MAX_CAPACITY = 500;
   const WARNING_THRESHOLD = 400;
 
+  const brewPlanResult = useMemo(() => {
+      if (productLevelRows.length === 0 || inventoryDB.length === 0) return null;
+      const productIds = productLevelRows.map((row) => row.brand);
+      const explicitWip = buildWipByProduct(packagingInventoryDB);
+      const historicalByProduct = buildHistoricalDemandByProduct(historicalRows, productIds);
+      const impliedWip = computeImpliedWipByProduct(historicalByProduct, BREW_LEAD_TIME_WEEKS);
+      const wipByProduct = Object.fromEntries(
+        productIds.map((p) => [p, (explicitWip[p] ?? 0) > 0 ? explicitWip[p] : (impliedWip[p] ?? 0)]),
+      );
+      const minWeeklyBrewByProduct = computeDefaultMinWeeklyBrewByProduct(historicalByProduct, BREW_BATCH_SIZE);
+      const input = buildBrewPlanningInput({
+          forecastCycleId: sessionId || "current",
+          generatedAt: new Date().toISOString(),
+          weekStartDates,
+          productLevelRows,
+          inventoryDB,
+          historicalRows,
+          manualBrewPlan,
+          globalServiceLevel,
+          wipByProduct,
+          minWeeklyBrewByProduct,
+          planningHorizonWeeks: 8,
+          brewLeadTimeWeeks: BREW_LEAD_TIME_WEEKS,
+          batchSizeBarrels: BREW_BATCH_SIZE,
+          targetCapacityBarrels: WARNING_THRESHOLD,
+          maxCapacityBarrels: MAX_CAPACITY,
+      });
+      return generateBrewPlan(input);
+  }, [sessionId, weekStartDates, productLevelRows, inventoryDB, historicalRows, manualBrewPlan, globalServiceLevel, packagingInventoryDB]);
+
   const masterSchedule = useMemo(() => {
-      const weeklyTotals = [0,0,0,0,0,0];
+      const weeklyTotals = Array(BREW_DISPLAY_WEEKS).fill(0) as number[];
       const productBreakdown: Record<string, number[]> = {};
       const productUrgency: Record<string, 'RED' | 'YELLOW' | 'GREEN'> = {};
       let hasWarning = false;
@@ -886,28 +937,28 @@ export default function Home() {
           const prod = productLevelRows.find(r => r.brand === p) || { Week1: 0, Week2: 0, Week3: 0, Week4: 0, Week5: 0, Week6: 0, Week7: 0, Week8: 0 };
           const wf = [prod.Week1, prod.Week2, prod.Week3, prod.Week4, prod.Week5, prod.Week6, prod.Week7, prod.Week8];
           const inv = inventoryDB.find(i => i.name === p) || { startInv: 0, finalSS: 10 };
-          const manuals = manualBrewPlan[p] || {};
-
           const avgDemand = wf.reduce((a, b) => a + b, 0) / 8;
-          const leadTimeDemand = avgDemand * 2;
-          const reorderPoint = inv.finalSS + leadTimeDemand;
-
-          if (inv.startInv <= inv.finalSS) {
-              productUrgency[p] = 'RED';
-          } else if (inv.startInv <= reorderPoint) {
-              productUrgency[p] = 'YELLOW';
-          } else {
-              productUrgency[p] = 'GREEN';
-          }
-
-          const plan = generateCapacityPlan(p, wf, inv.startInv, inv.finalSS, manuals);
-          productBreakdown[p] = plan.plannedRelease;
-          plan.plannedRelease.forEach((r, i) => weeklyTotals[i] += r);
+          const reorderPoint = inv.finalSS + avgDemand * BREW_LEAD_TIME_WEEKS;
+          if (inv.startInv <= inv.finalSS) productUrgency[p] = 'RED';
+          else if (inv.startInv <= reorderPoint) productUrgency[p] = 'YELLOW';
+          else productUrgency[p] = 'GREEN';
       });
+
+      if (brewPlanResult) {
+          products.forEach((p) => {
+              const productRows = brewPlanResult.productLevelBrewPlan
+                  .filter((row) => row.product_id === p)
+                  .slice(0, BREW_DISPLAY_WEEKS);
+              const releases = productRows.map((row) => row.planned_order_release);
+              while (releases.length < BREW_DISPLAY_WEEKS) releases.push(0);
+              productBreakdown[p] = releases;
+              releases.forEach((release, weekIndex) => { weeklyTotals[weekIndex] += release; });
+          });
+      }
 
       weeklyTotals.forEach(t => { if (t > WARNING_THRESHOLD) hasWarning = true; });
       return { weeklyTotals, productBreakdown, productUrgency, hasWarning };
-  }, [products, productLevelRows, inventoryDB, manualBrewPlan]);
+  }, [products, productLevelRows, inventoryDB, brewPlanResult]);
 
   const opsProductData = useMemo(() => {
     if (!selectedOpsProduct || inventoryDB.length === 0) return null;
@@ -917,129 +968,79 @@ export default function Home() {
     return { name: selectedOpsProduct, forecasts: wf, startInv: inv.startInv, finalSS: inv.finalSS, manualReleases: manualBrewPlan[selectedOpsProduct] || {} };
   }, [productLevelRows, selectedOpsProduct, inventoryDB, manualBrewPlan]);
 
-  // MOVED OUT OF RENDER HELPER TO OBEY RULES OF HOOKS
-  const brandPackagingRows = useMemo(() => {
-    const grouped: Record<string, PivotRow> = {};
-    rows.filter(r => r.brand === selectedOpsProduct && r.packaging_format !== "ALL").forEach(r => {
-        const key = `${r.brand}||${r.channel}||${r.packaging_format}`;
-        if (!grouped[key]) grouped[key] = { key, brand: r.brand, channel: r.channel, packaging_format: r.packaging_format, Week1: null, Week2: null, Week3: null, Week4: null, Week5: null, Week6: null, Week7: null, Week8: null };
-        if (r.week_number >= 1 && r.week_number <= 8) grouped[key][`Week${r.week_number}` as keyof PivotRow] = getEffectiveOrForecast(r) as never;
-    });
-    return Object.values(grouped).sort((a, b) => a.packaging_format.localeCompare(b.packaging_format));
-  }, [rows, selectedOpsProduct]);
-
   const packagingPlan = useMemo(() => {
-    if (!opsProductData) return [];
+    if (!brewPlanResult || !selectedOpsProduct) return [];
 
-    const brewingPlan = generateCapacityPlan(
-      opsProductData.name,
-      opsProductData.forecasts,
-      opsProductData.startInv,
-      opsProductData.finalSS,
-      opsProductData.manualReleases
+    const packagingDemand = mapPackagingDemand(
+      rows.map((r) => ({ brand: r.brand, packaging_format: r.packaging_format, week_number: r.week_number, previous_value: r.previous_value, effective_value: r.effective_value })),
+      weekStartDates,
+      8,
     );
-    const inventoryByFormat: Record<string, number> = {};
-    packagingInventoryDB
-      .filter((item) => item.brand === selectedOpsProduct)
-      .forEach((item) => {
-        inventoryByFormat[item.packaging_format] = (inventoryByFormat[item.packaging_format] || 0) + item.startInv;
-      });
+    const packagingInventory = mapPackagingInventory(
+      packagingInventoryDB.map((p) => ({ brand: p.brand, packaging_format: p.packaging_format, startInv: p.startInv })),
+    );
+    const productPackagingPairs = collectProductPackagingPairs(packagingDemand, packagingInventory);
+    const packagingHistory = mapPackagingHistory(
+      historicalRows.map((h) => ({ Date: h.Date, ProductName: h.ProductName, PackagingTypeName: h.PackagingTypeName, "Sales Vol": h["Sales Vol"] })),
+      productPackagingPairs,
+    );
+    const bblPerUnitByFormat = Object.fromEntries(
+      Object.entries(PACKAGING_CONVERSIONS).map(([format, conv]) => [format, conv.bblPerUnit]),
+    );
 
-    const demandByFormat: Record<string, number[]> = {};
-    brandPackagingRows.forEach((row) => {
-      demandByFormat[row.packaging_format] = [1, 2, 3, 4, 5, 6].map((w) => Number(row[`Week${w}` as keyof PivotRow] || 0));
+    const result = generatePackagingPlan({
+      brewPlan: brewPlanResult,
+      packagingDemand,
+      packagingHistory,
+      packagingInventory,
+      bblPerUnitByFormat,
+      serviceLevelByProduct: Object.fromEntries(products.map((p) => [p, globalServiceLevel])) as Record<string, ServiceLevel>,
     });
 
-    const formats = Array.from(new Set([
-      ...Object.keys(demandByFormat),
-      ...Object.keys(inventoryByFormat),
-    ])).sort();
-    const projected = Object.fromEntries(formats.map((format) => [format, inventoryByFormat[format] || 0]));
+    const productRows = result.packagingPlan.filter((r) => r.product_id === selectedOpsProduct);
+    const summaries = result.weeklySummary.filter((s) => s.product_id === selectedOpsProduct);
 
-    return weekLabels.slice(0, 6).map((label, weekIndex) => {
-      const startByFormat = Object.fromEntries(formats.map((format) => [format, projected[format] || 0]));
-      formats.forEach((format) => {
-        projected[format] = (projected[format] || 0) - (demandByFormat[format]?.[weekIndex] || 0);
-      });
+    const sixWeekVelocityByFormat: Record<string, number> = {};
+    productRows.slice(0, 6 * Math.max(1, new Set(productRows.map((r) => r.packaging_format)).size)).forEach((r) => {
+      sixWeekVelocityByFormat[r.packaging_format] = (sixWeekVelocityByFormat[r.packaging_format] ?? 0) + r.forecast_demand_bbl;
+    });
 
-      const readyBbl = Number(brewingPlan.plannedReceipt[weekIndex] || 0);
-      let remainingBbl = readyBbl;
-      const allocations: Record<string, { units: number; bbl: number; reason: string }> = {};
-      formats.forEach((format) => {
-        allocations[format] = { units: 0, bbl: 0, reason: "" };
-      });
+    const reasonText = (reason: string): string => {
+      if (reason === "mix_allocation") return "Historical mix split";
+      if (reason === "remainder_sweep") return "Surplus to fastest mover";
+      if (reason === "no_demand_share") return "No demand history or forecast";
+      return "No liquid ready";
+    };
 
-      const rowsForWeek = formats.map((format) => {
-        const futureDemand = (demandByFormat[format]?.[weekIndex + 1] || 0) + (demandByFormat[format]?.[weekIndex + 2] || 0);
-        const sixWeekDemand = (demandByFormat[format] || []).reduce((sum, value) => sum + value, 0);
-        const targetBbl = Math.max(futureDemand, sixWeekDemand / 6);
-        const gapBbl = Math.max(0, targetBbl - (projected[format] || 0));
-        return {
-          format,
-          bblPerUnit: getBblPerUnit(format),
-          demandBbl: demandByFormat[format]?.[weekIndex] || 0,
-          targetBbl,
-          gapBbl,
-          velocityBbl: sixWeekDemand,
-        };
-      });
+    return weekStartDates.slice(0, 6).map((weekStart, weekIndex) => {
+      const summary = summaries.find((s) => s.week_start_date === weekStart);
+      const weekRows = productRows.filter((r) => r.week_start_date === weekStart);
+      const detailRows = weekRows.map((r) => ({
+        format: r.packaging_format,
+        bblPerUnit: r.bbl_per_unit,
+        startInvBbl: r.starting_inventory_bbl,
+        demandBbl: r.forecast_demand_bbl,
+        targetBbl: r.target_inventory_bbl,
+        gapBbl: r.inventory_gap_bbl,
+        velocityBbl: sixWeekVelocityByFormat[r.packaging_format] ?? 0,
+        beforePackagingBbl: r.projected_available_before_packaging_bbl,
+        units: r.package_units,
+        packagedBbl: r.allocated_bbl,
+        projectedEndBbl: r.projected_available_after_packaging_bbl,
+        reason: reasonText(r.allocation_reason),
+      })).sort((a, b) => b.units - a.units || b.velocityBbl - a.velocityBbl || a.format.localeCompare(b.format));
 
-      rowsForWeek
-        .filter((row) => row.gapBbl > 0 && row.bblPerUnit > 0)
-        .sort((a, b) => b.gapBbl - a.gapBbl || b.velocityBbl - a.velocityBbl)
-        .forEach((row) => {
-          if (remainingBbl <= 0) return;
-          const units = Math.floor(Math.min(row.gapBbl, remainingBbl) / row.bblPerUnit);
-          if (units <= 0) return;
-          const bbl = units * row.bblPerUnit;
-          allocations[row.format].units += units;
-          allocations[row.format].bbl += bbl;
-          allocations[row.format].reason = "Restock to target";
-          projected[row.format] += bbl;
-          remainingBbl -= bbl;
-        });
-
-      if (remainingBbl > 0 && formats.length > 0) {
-        const fastest = rowsForWeek
-          .filter((row) => row.bblPerUnit > 0)
-          .sort((a, b) => b.velocityBbl - a.velocityBbl || a.bblPerUnit - b.bblPerUnit)[0];
-        if (fastest) {
-          const units = Math.max(1, Math.round(remainingBbl / fastest.bblPerUnit));
-          const bbl = units * fastest.bblPerUnit;
-          allocations[fastest.format].units += units;
-          allocations[fastest.format].bbl += bbl;
-          allocations[fastest.format].reason = allocations[fastest.format].reason
-            ? `${allocations[fastest.format].reason}; drain remainder to fastest mover`
-            : "Drain remainder to fastest mover";
-          projected[fastest.format] += bbl;
-          remainingBbl -= bbl;
-        }
-      }
-
-      const detailRows = rowsForWeek.map((row) => {
-        const allocation = allocations[row.format];
-        const projectedEndBbl = projected[row.format] || 0;
-        return {
-          ...row,
-          startInvBbl: startByFormat[row.format] || 0,
-          beforePackagingBbl: (startByFormat[row.format] || 0) - row.demandBbl,
-          units: allocation.units,
-          packagedBbl: allocation.bbl,
-          projectedEndBbl,
-          reason: allocation.reason || (readyBbl > 0 ? "No SKU gap" : "No liquid ready"),
-        };
-      }).sort((a, b) => b.units - a.units || b.velocityBbl - a.velocityBbl || a.format.localeCompare(b.format));
-
-      const totalPackagedBbl = detailRows.reduce((sum, row) => sum + row.packagedBbl, 0);
+      const totalPackagedBbl = detailRows.reduce((sum, r) => sum + r.packagedBbl, 0);
+      const readyBbl = summary?.ready_to_package_bbl ?? 0;
       return {
-        label,
+        label: weekLabels[weekIndex],
         readyBbl,
         totalPackagedBbl,
         varianceBbl: readyBbl - totalPackagedBbl,
         rows: detailRows,
       };
     });
-  }, [opsProductData, brandPackagingRows, packagingInventoryDB, selectedOpsProduct, weekLabels]);
+  }, [brewPlanResult, rows, packagingInventoryDB, historicalRows, selectedOpsProduct, weekLabels, weekStartDates, products, globalServiceLevel]);
 
 
   const handleGlobalSLChange = (newSL: RevisedServiceLevel) => {
@@ -1371,9 +1372,33 @@ export default function Home() {
   }
 
 
+  function adaptBrewRowsToLegacyShape(rows: ProductLevelBrewPlanRow[], displayWeeks: number, leadTimeWeeks: number) {
+    const slice = rows.slice(0, displayWeeks);
+    const totalForecast = slice.reduce((sum, row) => sum + row.forecast_barrels, 0);
+    return {
+      productName: rows[0]?.product_name ?? "",
+      totalForecast,
+      avgWeeklyDemand: displayWeeks > 0 ? totalForecast / displayWeeks : 0,
+      startInv: rows[0]?.starting_inventory ?? 0,
+      safetyStock: rows[0]?.safety_stock ?? 0,
+      forecasts: slice.map((row) => row.forecast_barrels),
+      projAvailable: slice.map((row) => row.projected_available),
+      plannedReceipt: slice.map((row) => row.planned_order_receipt),
+      plannedRelease: slice.map((row) => row.planned_order_release),
+      netRequirements: slice.map((row) => row.net_requirement),
+      grossRequirements: slice.map((row) => row.gross_requirements),
+      startingInventoryByWeek: slice.map((row) => row.starting_inventory),
+      batchSize: BREW_BATCH_SIZE,
+      leadTimeWeeks,
+      pastDueReceipts: rows.slice(0, leadTimeWeeks).reduce((sum, row) => sum + row.planned_order_receipt, 0),
+      displayWeeks,
+    };
+  }
+
   function renderBrewingTab() {
-    if (!masterSchedule || !opsProductData) return null;
-    const productPlan = generateCapacityPlan(opsProductData.name, opsProductData.forecasts, opsProductData.startInv, opsProductData.finalSS, opsProductData.manualReleases);
+    if (!masterSchedule || !opsProductData || !brewPlanResult) return null;
+    const productRows = brewPlanResult.productLevelBrewPlan.filter((row) => row.product_id === opsProductData.name);
+    const productPlan = adaptBrewRowsToLegacyShape(productRows, BREW_DISPLAY_WEEKS, BREW_LEAD_TIME_WEEKS);
     const brewingLocked = !!planWorkflow.brewingLockedAt;
     return (
       <div style={{ display: "flex", flexDirection: "column", gap: "20px" }}>

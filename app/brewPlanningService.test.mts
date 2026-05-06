@@ -11,9 +11,13 @@ import {
 import { fixtureBrewPlanningInput } from "./brewPlanningService.fixtures.ts";
 import {
   advanceRevisedBrewPlanHistory,
+  buildBrewPlanningInput,
   buildHistoricalDemandByProduct,
   buildServiceLevelByProduct,
   buildWipByProduct,
+  computeDefaultMinWeeklyBrewByProduct,
+  computeImpliedWipByProduct,
+  derivePastDueReceiptsByProduct,
   isWipPackaging,
   mapProductLevelForecasts,
 } from "./revisedBrewPlanMapper.ts";
@@ -193,6 +197,265 @@ test("preserves forecast cycle id and generated date on generated plan rows", ()
   assert.equal(plan.generatedAt, generatedAt);
   assert.ok(plan.productLevelBrewPlan.every((item) => item.forecast_cycle_id === "cycle-123"));
   assert.ok(plan.productLevelBrewPlan.every((item) => item.generated_at === generatedAt));
+});
+
+test("manual release override at week W replaces computed release and drives receipt at W+leadTime", () => {
+  const plan = generateBrewPlan({
+    forecastCycleId: "manual-override-test",
+    generatedAt: "2026-05-04T12:00:00.000Z",
+    planningHorizonWeeks: 6,
+    brewLeadTimeWeeks: 2,
+    currentInventoryByProduct: { p1: 200 },
+    historicalDemandByProduct: { p1: [10, 10, 10] },
+    productForecasts: [{
+      product_id: "p1",
+      product_name: "Product 1",
+      weeklyForecastBarrels: [0, 0, 0, 0, 250, 0],
+      weekStartDates: ["2026-05-04", "2026-05-11", "2026-05-18", "2026-05-25", "2026-06-01", "2026-06-08"],
+    }],
+    manualReleasesByProduct: {
+      p1: { 2: 150 },
+    },
+  });
+
+  const releaseAt2 = plan.productLevelBrewPlan.find((r) => r.product_id === "p1" && r.week_start_date === "2026-05-18");
+  const receiptAt4 = plan.productLevelBrewPlan.find((r) => r.product_id === "p1" && r.week_start_date === "2026-06-01");
+  assert.ok(releaseAt2);
+  assert.ok(receiptAt4);
+  assert.equal(releaseAt2.planned_order_release, 150);
+  assert.equal(receiptAt4.planned_order_receipt, 150);
+});
+
+test("manual release at week 0 is taken as-is — past-due receipts are not bumped on top of override", () => {
+  const plan = generateBrewPlan({
+    forecastCycleId: "override-week0",
+    generatedAt: "2026-05-04T12:00:00.000Z",
+    planningHorizonWeeks: 4,
+    currentInventoryByProduct: { p1: 0 },
+    historicalDemandByProduct: { p1: [10, 10, 10] },
+    productForecasts: [{
+      product_id: "p1",
+      product_name: "Product 1",
+      weeklyForecastBarrels: [10, 10, 0, 0],
+      weekStartDates: ["2026-05-04", "2026-05-11", "2026-05-18", "2026-05-25"],
+    }],
+    manualReleasesByProduct: {
+      p1: { 0: 0 },
+    },
+  });
+
+  const week0 = plan.productLevelBrewPlan.find((r) => r.week_start_date === "2026-05-04");
+  assert.ok(week0);
+  assert.equal(week0.planned_order_release, 0);
+});
+
+test("safetyStockOverride replaces calculated safety stock and propagates into net requirement", () => {
+  const plan = generateBrewPlan({
+    forecastCycleId: "ss-override-test",
+    generatedAt: "2026-05-04T12:00:00.000Z",
+    planningHorizonWeeks: 4,
+    currentInventoryByProduct: { p1: 0 },
+    historicalDemandByProduct: { p1: [10, 20, 30, 40] },
+    safetyStockOverrideByProduct: { p1: 7 },
+    productForecasts: [{
+      product_id: "p1",
+      product_name: "Product 1",
+      weeklyForecastBarrels: [25, 0, 0, 0],
+      weekStartDates: ["2026-05-04", "2026-05-11", "2026-05-18", "2026-05-25"],
+    }],
+  });
+  const week0 = plan.productLevelBrewPlan.find((r) => r.week_start_date === "2026-05-04");
+  assert.ok(week0);
+  assert.equal(week0.safety_stock, 7);
+  assert.equal(week0.net_requirement, 32);
+});
+
+test("manual override on one product does not affect other products", () => {
+  const plan = generateBrewPlan({
+    forecastCycleId: "override-isolation",
+    generatedAt: "2026-05-04T12:00:00.000Z",
+    planningHorizonWeeks: 4,
+    currentInventoryByProduct: { p1: 200, p2: 200 },
+    historicalDemandByProduct: { p1: [10, 10, 10], p2: [10, 10, 10] },
+    productForecasts: [
+      {
+        product_id: "p1",
+        product_name: "Product 1",
+        weeklyForecastBarrels: [0, 0, 250, 0],
+        weekStartDates: ["2026-05-04", "2026-05-11", "2026-05-18", "2026-05-25"],
+      },
+      {
+        product_id: "p2",
+        product_name: "Product 2",
+        weeklyForecastBarrels: [0, 0, 250, 0],
+        weekStartDates: ["2026-05-04", "2026-05-11", "2026-05-18", "2026-05-25"],
+      },
+    ],
+    manualReleasesByProduct: {
+      p1: { 0: 999 },
+    },
+  });
+
+  const p1Week0 = plan.productLevelBrewPlan.find((r) => r.product_id === "p1" && r.week_start_date === "2026-05-04");
+  const p2Week0 = plan.productLevelBrewPlan.find((r) => r.product_id === "p2" && r.week_start_date === "2026-05-04");
+  assert.ok(p1Week0);
+  assert.ok(p2Week0);
+  assert.equal(p1Week0.planned_order_release, 999);
+  assert.notEqual(p2Week0.planned_order_release, 999);
+});
+
+test("buildBrewPlanningInput composes page-state shapes into a v2 input with safety stock override", () => {
+  const input = buildBrewPlanningInput({
+    forecastCycleId: "page-test",
+    generatedAt: "2026-05-04T12:00:00.000Z",
+    weekStartDates: ["2026-05-04", "2026-05-11", "2026-05-18", "2026-05-25", "2026-06-01", "2026-06-08", "2026-06-15", "2026-06-22"],
+    productLevelRows: [{ brand: "p1", Week1: 100, Week2: 0, Week3: 0, Week4: 0, Week5: 0, Week6: 0, Week7: 0, Week8: 0 }],
+    inventoryDB: [{ name: "p1", startInv: 50, finalSS: 25 }],
+    historicalRows: [],
+    manualBrewPlan: { p1: { 0: 200 } },
+    globalServiceLevel: 95,
+  });
+  assert.equal(input.currentInventoryByProduct.p1, 50);
+  assert.equal(input.safetyStockOverrideByProduct?.p1, 25);
+  assert.equal(input.serviceLevelByProduct?.p1, 95);
+  assert.equal(input.manualReleasesByProduct?.p1[0], 200);
+  assert.equal(input.productForecasts[0].weeklyForecastBarrels[0], 100);
+});
+
+test("buildBrewPlanningInput spreads WIP evenly across the brew lead-time window", () => {
+  const input = buildBrewPlanningInput({
+    forecastCycleId: "wip-test",
+    generatedAt: "2026-05-04T12:00:00.000Z",
+    weekStartDates: ["2026-05-04", "2026-05-11", "2026-05-18", "2026-05-25", "2026-06-01", "2026-06-08", "2026-06-15", "2026-06-22"],
+    productLevelRows: [{ brand: "p1", Week1: 50, Week2: 50, Week3: 50, Week4: 50, Week5: 0, Week6: 0, Week7: 0, Week8: 0 }],
+    inventoryDB: [{ name: "p1", startInv: 0, finalSS: 0 }],
+    historicalRows: [],
+    manualBrewPlan: {},
+    globalServiceLevel: 95,
+    wipByProduct: { p1: 120 },
+    brewLeadTimeWeeks: 2,
+  });
+  assert.deepEqual(input.scheduledReceiptsByProduct?.p1.slice(0, 3), [60, 60, 0]);
+});
+
+test("WIP spread shows up in brew plan scheduled_receipts across weeks 0..leadTime-1", () => {
+  const input = buildBrewPlanningInput({
+    forecastCycleId: "wip-end-to-end",
+    generatedAt: "2026-05-04T12:00:00.000Z",
+    weekStartDates: ["2026-05-04", "2026-05-11", "2026-05-18", "2026-05-25", "2026-06-01", "2026-06-08", "2026-06-15", "2026-06-22"],
+    productLevelRows: [{ brand: "p1", Week1: 30, Week2: 30, Week3: 0, Week4: 0, Week5: 0, Week6: 0, Week7: 0, Week8: 0 }],
+    inventoryDB: [{ name: "p1", startInv: 0, finalSS: 0 }],
+    historicalRows: [],
+    manualBrewPlan: {},
+    globalServiceLevel: 95,
+    wipByProduct: { p1: 100 },
+    brewLeadTimeWeeks: 2,
+  });
+  const plan = generateBrewPlan(input);
+  const week0 = plan.productLevelBrewPlan.find((r) => r.week_start_date === "2026-05-04");
+  const week1 = plan.productLevelBrewPlan.find((r) => r.week_start_date === "2026-05-11");
+  assert.ok(week0);
+  assert.ok(week1);
+  assert.equal(week0.scheduled_receipts, 50);
+  assert.equal(week1.scheduled_receipts, 50);
+});
+
+test("minWeeklyBrew floors releases AND drives matching receipts at week+leadTime", () => {
+  const plan = generateBrewPlan({
+    forecastCycleId: "min-brew-test",
+    generatedAt: "2026-05-04T12:00:00.000Z",
+    planningHorizonWeeks: 6,
+    brewLeadTimeWeeks: 2,
+    currentInventoryByProduct: { p1: 500 },
+    historicalDemandByProduct: { p1: [50, 50, 50, 50] },
+    productForecasts: [{
+      product_id: "p1",
+      product_name: "Product 1",
+      weeklyForecastBarrels: [50, 50, 50, 50, 50, 50],
+      weekStartDates: ["2026-05-04", "2026-05-11", "2026-05-18", "2026-05-25", "2026-06-01", "2026-06-08"],
+    }],
+    minWeeklyBrewByProduct: { p1: 50 },
+  });
+  const releases = plan.productLevelBrewPlan.map((row) => row.planned_order_release);
+  const receipts = plan.productLevelBrewPlan.map((row) => row.planned_order_receipt);
+  releases.forEach((release, weekIndex) => {
+    assert.ok(release >= 50, `release at week ${weekIndex} should be at least 50, got ${release}`);
+  });
+  for (let weekIndex = 2; weekIndex < 6; weekIndex += 1) {
+    assert.equal(
+      receipts[weekIndex],
+      releases[weekIndex - 2],
+      `receipt at week ${weekIndex} should equal release at week ${weekIndex - 2}`,
+    );
+  }
+});
+
+test("manual release override beats minWeeklyBrew floor", () => {
+  const plan = generateBrewPlan({
+    forecastCycleId: "manual-beats-floor",
+    generatedAt: "2026-05-04T12:00:00.000Z",
+    planningHorizonWeeks: 4,
+    currentInventoryByProduct: { p1: 200 },
+    historicalDemandByProduct: { p1: [10, 10, 10] },
+    productForecasts: [{
+      product_id: "p1",
+      product_name: "Product 1",
+      weeklyForecastBarrels: [10, 10, 10, 10],
+      weekStartDates: ["2026-05-04", "2026-05-11", "2026-05-18", "2026-05-25"],
+    }],
+    manualReleasesByProduct: { p1: { 1: 0 } },
+    minWeeklyBrewByProduct: { p1: 100 },
+  });
+  const week1 = plan.productLevelBrewPlan.find((row) => row.week_start_date === "2026-05-11");
+  assert.ok(week1);
+  assert.equal(week1.planned_order_release, 0);
+});
+
+test("computeDefaultMinWeeklyBrewByProduct rounds recent-avg-weekly DOWN to nearest batch", () => {
+  const result = computeDefaultMinWeeklyBrewByProduct(
+    {
+      "Steady Pupil": [80, 75, 70, 75],
+      "Tiny Brew": [10, 10, 10, 10],
+      "No Demand": [0, 0, 0, 0],
+    },
+    50,
+    4,
+  );
+  assert.equal(result["Steady Pupil"], 50);
+  assert.equal(result["Tiny Brew"], 0);
+  assert.equal(result["No Demand"], 0);
+});
+
+test("computeImpliedWipByProduct estimates pipeline as recent-avg-weekly × leadTime", () => {
+  const implied = computeImpliedWipByProduct(
+    {
+      "Steady Pupil": [80, 70, 75, 75, 60, 60, 60, 60, 60, 60, 60, 60, 60],
+      "Discontinued Beer": [0, 0, 0, 0, 50, 50, 50, 50],
+      "Brand New": [0, 0, 0, 0, 0, 0, 0, 0],
+    },
+    2,
+    4,
+  );
+  assert.equal(implied["Steady Pupil"], 150);
+  assert.equal(implied["Discontinued Beer"], 0);
+  assert.equal(implied["Brand New"], 0);
+});
+
+test("derivePastDueReceiptsByProduct sums receipts in lead-time window per product", () => {
+  const plan = generateBrewPlan({
+    forecastCycleId: "past-due-derive",
+    generatedAt: "2026-05-04T12:00:00.000Z",
+    planningHorizonWeeks: 4,
+    currentInventoryByProduct: { p1: 0, p2: 1000 },
+    historicalDemandByProduct: { p1: [10, 10, 10], p2: [10, 10, 10] },
+    productForecasts: [
+      { product_id: "p1", product_name: "Product 1", weeklyForecastBarrels: [10, 10, 0, 0], weekStartDates: ["2026-05-04", "2026-05-11", "2026-05-18", "2026-05-25"] },
+      { product_id: "p2", product_name: "Product 2", weeklyForecastBarrels: [10, 10, 0, 0], weekStartDates: ["2026-05-04", "2026-05-11", "2026-05-18", "2026-05-25"] },
+    ],
+  });
+  const pastDue = derivePastDueReceiptsByProduct(plan, 2);
+  assert.ok(pastDue.p1 > 0);
+  assert.equal(pastDue.p2, 0);
 });
 
 test("advances browser-only revised brew plan history after a new generation", () => {
