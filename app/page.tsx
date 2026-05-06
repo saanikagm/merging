@@ -642,8 +642,6 @@ export default function Home() {
       });
 
       function baseSSFor(product: string): number {
-        if (ssByProduct[product] !== undefined) return ssByProduct[product];
-
         const buckets = weeklyHistory[product];
         if (!buckets) return 10;
 
@@ -661,7 +659,8 @@ export default function Home() {
         }
 
         const sigma = stdDev(valuesWindow);
-        return Number(sigma.toFixed(2)) || 10;
+        const baselineSafetyStock = sigma * 1.645;
+        return Number(baselineSafetyStock.toFixed(2)) || 10;
       }
 
       const initialInv = Object.entries(totalsByProduct).map(([name, total]) => {
@@ -1074,10 +1073,10 @@ export default function Home() {
 
   const handleGlobalSLChange = (newSL: RevisedServiceLevel) => {
     setGlobalServiceLevel(newSL);
-    setInventoryDB(prev => prev.map(item => {
-      const sigma = revisedSafetyStatsByProduct[item.name]?.stdDev ?? item.baseSafetyStock;
-      return { ...item, finalSS: Number((sigma * REVISED_SAFETY_FACTORS[newSL]).toFixed(2)) };
-    }));
+    setInventoryDB(prev => prev.map(item => ({
+      ...item,
+      finalSS: Number(((item.baseSafetyStock ?? 0) * getZRatio(newSL)).toFixed(2)),
+    })));
   };
 
   const handleInventoryUpdate = (name: string, field: "startInv" | "finalSS", value: string) => {
@@ -1423,16 +1422,15 @@ export default function Home() {
                   <th style={{ textAlign: "center", padding: "14px 16px", borderBottom: "1px solid #e5e7eb", fontSize: "13px", fontWeight: 700, color: "#374151" }}>Starting Inv</th>
                   <th style={{ textAlign: "center", padding: "14px 16px", borderBottom: "1px solid #e5e7eb", fontSize: "13px", fontWeight: 700, color: "#9ca3af" }}>Std Dev Lookback</th>
                   <th style={{ textAlign: "center", padding: "14px 16px", borderBottom: "1px solid #e5e7eb", fontSize: "13px", fontWeight: 700, color: "#9ca3af" }}>Std Dev</th>
-                  <th style={{ textAlign: "center", padding: "14px 16px", borderBottom: "1px solid #e5e7eb", fontSize: "13px", fontWeight: 700, color: "#2563eb" }}>Calculated SS</th>
-                  <th style={{ textAlign: "center", padding: "14px 16px", borderBottom: "1px solid #e5e7eb", fontSize: "13px", fontWeight: 700, color: "#7e22ce", background: "#f3e8ff" }}>Desired Safety Stock</th>
+                  <th style={{ textAlign: "center", padding: "14px 16px", borderBottom: "1px solid #e5e7eb", fontSize: "13px", fontWeight: 700, color: "#7e22ce", background: "#f3e8ff" }}>Safety Stock</th>
                   <th style={{ textAlign: "center", padding: "14px 16px", borderBottom: "1px solid #e5e7eb", fontSize: "13px", fontWeight: 700, color: "#9ca3af" }}>Avg Demand</th>
                 </tr>
               </thead>
               <tbody>
                 {enrichedInventoryDB.map((item, index) => {
                   const safetyStats = revisedSafetyStatsByProduct[item.name] || { lookbackWeeks: 13, stdDev: 0 };
-                  const calcSS = Number((safetyStats.stdDev * REVISED_SAFETY_FACTORS[globalServiceLevel]).toFixed(2));
-                  const isSSAudited = item.finalSS !== calcSS;
+                  const calcSS = Number(((item.baseSafetyStock ?? 0) * getZRatio(globalServiceLevel)).toFixed(2));
+                  const isSSAudited = Number(item.finalSS).toFixed(2) !== calcSS.toFixed(2);
                   const isInvAudited = item.startInv !== item.originalStartInv;
 
                   return (
@@ -1462,7 +1460,6 @@ export default function Home() {
                       </td>
                       <td style={{...cellStyle, textAlign: "center", color: "#6b7280"}}>{safetyStats.lookbackWeeks} wks</td>
                       <td style={{...cellStyle, textAlign: "center", color: "#6b7280"}}>{formatNumber(safetyStats.stdDev)}</td>
-                      <td style={{...cellStyle, textAlign: 'center', color: '#2563eb', fontWeight: 'bold'}}>{formatNumber(calcSS)}</td>
                       <td style={{...cellStyle, textAlign: 'center', background: '#f3e8ff'}}>
                         <input
                           key={`ss-${item.name}-${item.finalSS}-${cancelTick}`}
@@ -1477,6 +1474,7 @@ export default function Home() {
                           }}
                           style={{...inputStyle, textAlign: 'center', fontWeight: 'bold', color: isSSAudited ? '#b45309' : '#7e22ce', border: isSSAudited ? '2px solid #f59e0b' : '1px solid #d1d5db'}}
                         />
+                        <div style={{ fontSize: '11px', color: '#94a3b8', marginTop: '4px' }}>Math suggests {formatNumber(calcSS)}</div>
                       </td>
                       <td style={{...cellStyle, textAlign: 'center', color: '#6b7280'}}>{formatNumber(item.avgDemand)}</td>
                     </tr>

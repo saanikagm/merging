@@ -37,15 +37,14 @@ export default function InventoryTab({ inventoryDB, globalServiceLevel, onGlobal
                             <th className="p-4 font-semibold">Product Name</th>
                             <th className="p-4 font-semibold text-center bg-slate-100/50">Starting Inv</th>
                             <th className="p-4 font-semibold text-center text-slate-400 border-r border-slate-200">Avg Demand</th>
-                            <th className="p-4 font-semibold text-center text-blue-600">Calculated SS</th>
-                            <th className="p-4 font-semibold text-center bg-purple-50 text-purple-800">Audited Final SS</th>
-                            <th className="p-4 font-semibold text-center text-slate-400">Audit Reason / Notes</th>
+                            <th className="p-4 font-semibold text-center bg-purple-50 text-purple-800">Safety Stock</th>
+                            <th className="p-4 font-semibold text-center text-slate-400">Notes</th>
                         </tr>
                     </thead>
                     <tbody>
                         {inventoryDB.map((item: any) => {
-                            const calculatedSS = item.baseSafetyStock * getZRatio(globalServiceLevel);
-                            const isAudited = item.finalSS !== Number(calculatedSS.toFixed(2));
+                            const calculatedSS = Number(((item.baseSafetyStock ?? 0) * getZRatio(globalServiceLevel)).toFixed(2));
+                            const isAudited = Number(item.finalSS).toFixed(2) !== calculatedSS.toFixed(2);
 
                             return (
                                 <tr key={item.name} className="border-b border-slate-100 hover:bg-slate-50 transition-colors">
@@ -64,17 +63,16 @@ export default function InventoryTab({ inventoryDB, globalServiceLevel, onGlobal
                                         {fmtDec(item.avgDemand)}
                                     </td>
 
-                                    <td className="p-4 text-center text-blue-600 font-bold bg-blue-50/30">
-                                        {fmtDec(calculatedSS)}
-                                    </td>
-
                                     <td className="p-4 text-center bg-purple-50/30">
                                         <input
                                             type="number"
                                             value={item.finalSS}
                                             onChange={(e) => onUpdate(item.name, 'finalSS', Number(e.target.value))}
-                                            className={`w-20 p-2 border-2 rounded outline-none font-black text-center ${isAudited ? 'border-amber-400 text-amber-700 bg-amber-50' : 'border-purple-200 text-purple-700 focus:border-purple-600'}`}
+                                            className={`w-24 p-2 border-2 rounded outline-none font-black text-center ${isAudited ? 'border-amber-400 text-amber-700 bg-amber-50' : 'border-purple-200 text-purple-700 focus:border-purple-600'}`}
                                         />
+                                        <div className="text-[11px] text-slate-400 mt-1">
+                                            Math suggests {fmtDec(calculatedSS)}
+                                        </div>
                                     </td>
 
                                     <td className="p-4">
