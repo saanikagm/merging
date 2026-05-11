@@ -352,7 +352,7 @@ export default function Home() {
         Object.entries(totalsByProduct).forEach(([name, total]) => {
           if (name === "Unknown" || existingNames.has(name)) return;
           const rounded = Number(total.toFixed(2));
-          updated.push({ name, startInv: rounded, originalStartInv: rounded, baseSafetyStock: 10, finalSS: 10 });
+          updated.push({ name, startInv: rounded, originalStartInv: rounded, baseSafetyStock: 0, finalSS: 0 });
         });
         return updated.sort((a, b) => a.name.localeCompare(b.name));
       });
@@ -643,8 +643,7 @@ export default function Home() {
       });
 
       function baseSSFor(product: string): number {
-        const buckets = weeklyHistory[product];
-        if (!buckets) return 10;
+        const buckets = weeklyHistory[product] || {};
 
         let recentTotal = 0;
         for (let i = 0; i < 13; i++) {
@@ -661,7 +660,7 @@ export default function Home() {
 
         const sigma = stdDev(valuesWindow);
         const baselineSafetyStock = sigma * 1.645;
-        return Number(baselineSafetyStock.toFixed(2)) || 10;
+        return Number(baselineSafetyStock.toFixed(2));
       }
 
       const initialInv = Object.entries(totalsByProduct).map(([name, total]) => {
