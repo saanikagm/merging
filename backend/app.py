@@ -6,7 +6,7 @@ from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 from generate_demand_plan import generate_demand_plan
-from tableau_inventory import fetch_inventory
+from tableau_inventory import fetch_inventory, fetch_wip_schedule
 
 app = FastAPI()
 
@@ -67,6 +67,20 @@ def inventory(x_api_key: str | None = Header(default=None)):
         rows = fetch_inventory()
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Tableau fetch failed: {e}")
+    return {"rows": rows}
+
+
+@app.get("/wip-schedule")
+def wip_schedule(
+    week_dates: str | None = None,
+    x_api_key: str | None = Header(default=None),
+):
+    _check_auth(x_api_key)
+    dates = [d.strip() for d in (week_dates or "").split(",") if d.strip()] or None
+    try:
+        rows = fetch_wip_schedule(dates)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Tableau WIP fetch failed: {e}")
     return {"rows": rows}
 
 

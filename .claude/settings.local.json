@@ -3,7 +3,14 @@
     "allow": [
       "Bash(npm run *)",
       "Bash(npx tsc *)",
-      "Bash(git fetch *)"
+      "Bash(git fetch *)",
+      "Read(//Users/saanikagupta/**)",
+      "Bash(python3 -c \"import openpyxl; print\\(openpyxl.__version__\\)\")",
+      "Bash(pip3 install *)",
+      "Bash(curl -sS -o /dev/null -m 2 http://127.0.0.1:8000/health)",
+      "Bash(curl -sS -m 5 http://127.0.0.1:8000/health)",
+      "Bash(python3)",
+      "Bash(python3 -c ' *)"
     ]
   }
 }

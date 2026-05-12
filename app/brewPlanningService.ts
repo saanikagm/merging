@@ -25,7 +25,6 @@ export type BrewPlanningInput = {
   priorPlanRows?: ProductLevelBrewPlanRow[];
   manualReleasesByProduct?: Record<string, Record<number, number>>;
   safetyStockOverrideByProduct?: Record<string, number>;
-  minWeeklyBrewByProduct?: Record<string, number>;
 };
 
 export type ProductLevelBrewPlanRow = {
@@ -201,30 +200,6 @@ export function generateBrewPlan(input: BrewPlanningInput): BrewPlanningResult {
       const release = plannedReceipts[receiptIndex] ?? 0;
       return weekIndex === 0 ? release + pastDueReceipts : release;
     });
-
-    const minWeeklyBrew = input.minWeeklyBrewByProduct?.[forecast.product_id] ?? 0;
-    if (minWeeklyBrew > 0) {
-      for (let weekIndex = 0; weekIndex < planningHorizonWeeks; weekIndex += 1) {
-        if (manualReleases[weekIndex] !== undefined) continue;
-        if (plannedReleases[weekIndex] < minWeeklyBrew) {
-          plannedReleases[weekIndex] = minWeeklyBrew;
-        }
-      }
-      for (let weekIndex = brewLeadTimeWeeks; weekIndex < planningHorizonWeeks; weekIndex += 1) {
-        const releaseWeek = weekIndex - brewLeadTimeWeeks;
-        if (manualReleases[releaseWeek] !== undefined) continue;
-        plannedReceipts[weekIndex] = plannedReleases[releaseWeek];
-      }
-      let priorAvail = currentInventory;
-      for (let weekIndex = 0; weekIndex < planningHorizonWeeks; weekIndex += 1) {
-        const gross = valueAt(horizonForecast, weekIndex);
-        const sched = valueAt(scheduledReceipts, weekIndex);
-        const recv = plannedReceipts[weekIndex];
-        const avail = priorAvail + sched + recv - gross;
-        projectedAvailable[weekIndex] = avail;
-        priorAvail = avail;
-      }
-    }
 
     for (let weekIndex = 0; weekIndex < planningHorizonWeeks; weekIndex += 1) {
       const receiptReleaseBeforeHorizon = weekIndex < brewLeadTimeWeeks && plannedReceipts[weekIndex] > 0;

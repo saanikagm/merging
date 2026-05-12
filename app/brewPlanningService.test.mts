@@ -15,7 +15,6 @@ import {
   buildHistoricalDemandByProduct,
   buildServiceLevelByProduct,
   buildWipByProduct,
-  computeDefaultMinWeeklyBrewByProduct,
   computeImpliedWipByProduct,
   derivePastDueReceiptsByProduct,
   isWipPackaging,
@@ -358,72 +357,6 @@ test("WIP spread shows up in brew plan scheduled_receipts across weeks 0..leadTi
   assert.ok(week1);
   assert.equal(week0.scheduled_receipts, 50);
   assert.equal(week1.scheduled_receipts, 50);
-});
-
-test("minWeeklyBrew floors releases AND drives matching receipts at week+leadTime", () => {
-  const plan = generateBrewPlan({
-    forecastCycleId: "min-brew-test",
-    generatedAt: "2026-05-04T12:00:00.000Z",
-    planningHorizonWeeks: 6,
-    brewLeadTimeWeeks: 2,
-    currentInventoryByProduct: { p1: 500 },
-    historicalDemandByProduct: { p1: [50, 50, 50, 50] },
-    productForecasts: [{
-      product_id: "p1",
-      product_name: "Product 1",
-      weeklyForecastBarrels: [50, 50, 50, 50, 50, 50],
-      weekStartDates: ["2026-05-04", "2026-05-11", "2026-05-18", "2026-05-25", "2026-06-01", "2026-06-08"],
-    }],
-    minWeeklyBrewByProduct: { p1: 50 },
-  });
-  const releases = plan.productLevelBrewPlan.map((row) => row.planned_order_release);
-  const receipts = plan.productLevelBrewPlan.map((row) => row.planned_order_receipt);
-  releases.forEach((release, weekIndex) => {
-    assert.ok(release >= 50, `release at week ${weekIndex} should be at least 50, got ${release}`);
-  });
-  for (let weekIndex = 2; weekIndex < 6; weekIndex += 1) {
-    assert.equal(
-      receipts[weekIndex],
-      releases[weekIndex - 2],
-      `receipt at week ${weekIndex} should equal release at week ${weekIndex - 2}`,
-    );
-  }
-});
-
-test("manual release override beats minWeeklyBrew floor", () => {
-  const plan = generateBrewPlan({
-    forecastCycleId: "manual-beats-floor",
-    generatedAt: "2026-05-04T12:00:00.000Z",
-    planningHorizonWeeks: 4,
-    currentInventoryByProduct: { p1: 200 },
-    historicalDemandByProduct: { p1: [10, 10, 10] },
-    productForecasts: [{
-      product_id: "p1",
-      product_name: "Product 1",
-      weeklyForecastBarrels: [10, 10, 10, 10],
-      weekStartDates: ["2026-05-04", "2026-05-11", "2026-05-18", "2026-05-25"],
-    }],
-    manualReleasesByProduct: { p1: { 1: 0 } },
-    minWeeklyBrewByProduct: { p1: 100 },
-  });
-  const week1 = plan.productLevelBrewPlan.find((row) => row.week_start_date === "2026-05-11");
-  assert.ok(week1);
-  assert.equal(week1.planned_order_release, 0);
-});
-
-test("computeDefaultMinWeeklyBrewByProduct rounds recent-avg-weekly DOWN to nearest batch", () => {
-  const result = computeDefaultMinWeeklyBrewByProduct(
-    {
-      "Steady Pupil": [80, 75, 70, 75],
-      "Tiny Brew": [10, 10, 10, 10],
-      "No Demand": [0, 0, 0, 0],
-    },
-    50,
-    4,
-  );
-  assert.equal(result["Steady Pupil"], 50);
-  assert.equal(result["Tiny Brew"], 0);
-  assert.equal(result["No Demand"], 0);
 });
 
 test("computeImpliedWipByProduct estimates pipeline as recent-avg-weekly × leadTime", () => {

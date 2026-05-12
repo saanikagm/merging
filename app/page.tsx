@@ -7,8 +7,8 @@ import {
   buildBrewPlanningInput,
   buildHistoricalDemandByProduct,
   buildWipByProduct,
-  computeDefaultMinWeeklyBrewByProduct,
   computeImpliedWipByProduct,
+  isWipPackaging,
 } from "./revisedBrewPlanMapper";
 import { generatePackagingPlan } from "./packagingPlanService";
 import {
@@ -163,6 +163,12 @@ function getPackagingName(record: Record<string, unknown>): string {
   ]) || "").trim();
 }
 
+function isWipRow(record: Record<string, unknown>): boolean {
+  const flag = String(record.WIP ?? record.wip ?? "").trim().toLowerCase();
+  if (flag === "wip" || flag === "true" || flag === "yes" || flag === "1") return true;
+  return isWipPackaging(getPackagingName(record));
+}
+
 function getInventoryVolume(record: Record<string, unknown>): number {
   return parseVolume(getRecordValue(record, [
     "Inventory Volume",
@@ -202,6 +208,32 @@ function downloadCsvFile(filename: string, lines: string[]) {
   URL.revokeObjectURL(url);
 }
 
+async function fetchWipScheduleAligned(
+  apiUrl: string,
+  apiKey: string,
+  weekStartDates: string[],
+): Promise<Record<string, number[]>> {
+  try {
+    const url = `${apiUrl}/wip-schedule?week_dates=${encodeURIComponent(weekStartDates.join(","))}`;
+    const res = await fetch(url, { headers: { "X-API-Key": apiKey } });
+    if (!res.ok) return {};
+    const json = await res.json();
+    const rows: Array<{ product_name: string; week_start_date: string; bbl: number }> = json.rows || [];
+    const aligned: Record<string, number[]> = {};
+    rows.forEach((r) => {
+      const idx = weekStartDates.indexOf(r.week_start_date);
+      if (idx < 0) return;
+      const bbl = Number(r.bbl);
+      if (!Number.isFinite(bbl) || bbl <= 0) return;
+      if (!aligned[r.product_name]) aligned[r.product_name] = Array(weekStartDates.length).fill(0);
+      aligned[r.product_name][idx] += bbl;
+    });
+    return aligned;
+  } catch {
+    return {};
+  }
+}
+
 function getNextMonday(fromDate = new Date()) {
   const date = new Date(fromDate);
   const day = date.getDay();
@@ -219,6 +251,7 @@ export default function Home() {
   const [historicalRows, setHistoricalRows] = useState<HistoricalRow[]>([]);
   const [inventoryDB, setInventoryDB] = useState<InventoryRow[]>([]);
   const [packagingInventoryDB, setPackagingInventoryDB] = useState<PackagingInventoryRow[]>([]);
+  const [wipScheduleByProductWeek, setWipScheduleByProductWeek] = useState<Record<string, number[]>>({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
@@ -334,7 +367,7 @@ export default function Home() {
         const packaging = getPackagingName(r);
         const vol = getInventoryVolume(r);
         if (!Number.isFinite(vol)) return;
-        totalsByProduct[name] = (totalsByProduct[name] || 0) + vol;
+        if (!isWipRow(r)) totalsByProduct[name] = (totalsByProduct[name] || 0) + vol;
         if (packaging && packaging !== "ALL") {
           const key = `${name}||${packaging}`;
           packagingTotals[key] ||= { brand: name, packaging_format: packaging, startInv: 0 };
@@ -360,6 +393,8 @@ export default function Home() {
         ...item,
         startInv: Number(item.startInv.toFixed(2)),
       })).sort((a, b) => a.brand.localeCompare(b.brand) || a.packaging_format.localeCompare(b.packaging_format)));
+      const wip = await fetchWipScheduleAligned(apiUrl, apiKey, weekStartDates);
+      setWipScheduleByProductWeek(wip);
       setInventoryLastRefreshedAt(new Date().toISOString());
     } catch (e) {
       console.error("Inventory refresh failed:", e);
@@ -576,7 +611,7 @@ export default function Home() {
           const startVol = getInventoryVolume(item);
           const ssVol = parseVolume(item.finalSS ?? item.safetyStock ?? item.safety_stock ?? item.baseSafetyStock ?? 10);
 
-          if (Number.isFinite(startVol)) totalsByProduct[name] = startVol;
+          if (Number.isFinite(startVol) && !isWipRow(item)) totalsByProduct[name] = startVol;
           if (Number.isFinite(ssVol)) ssByProduct[name] = ssVol;
           if (packaging && packaging !== "ALL" && Number.isFinite(startVol)) {
             const key = `${name}||${packaging}`;
@@ -599,7 +634,7 @@ export default function Home() {
                   const name = getProductName(r);
                   const packaging = getPackagingName(r);
                   const vol = getInventoryVolume(r);
-                  if (Number.isFinite(vol)) tableauTotals[name] = (tableauTotals[name] || 0) + vol;
+                  if (Number.isFinite(vol) && !isWipRow(r)) tableauTotals[name] = (tableauTotals[name] || 0) + vol;
                   if (packaging && packaging !== "ALL" && Number.isFinite(vol)) {
                     const key = `${name}||${packaging}`;
                     tableauPackagingTotals[key] ||= { brand: name, packaging_format: packaging, startInv: 0 };
@@ -689,6 +724,15 @@ export default function Home() {
         startInv: Number(item.startInv.toFixed(2)),
       })).sort((a, b) => a.brand.localeCompare(b.brand) || a.packaging_format.localeCompare(b.packaging_format)));
       if (sortedInv.length > 0) setSelectedOpsProduct(sortedInv[0].name);
+
+      try {
+        const apiUrl = process.env.NEXT_PUBLIC_FORECAST_API_URL || "http://localhost:8000";
+        const apiKey = process.env.NEXT_PUBLIC_FORECAST_API_KEY || "";
+        const wip = await fetchWipScheduleAligned(apiUrl, apiKey, weekStartDates);
+        setWipScheduleByProductWeek(wip);
+      } catch (e) {
+        console.log("WIP schedule fetch failed; falling back to implied WIP:", e);
+      }
 
       setLoading(false);
     }
@@ -931,7 +975,6 @@ export default function Home() {
       const wipByProduct = Object.fromEntries(
         productIds.map((p) => [p, (explicitWip[p] ?? 0) > 0 ? explicitWip[p] : (impliedWip[p] ?? 0)]),
       );
-      const minWeeklyBrewByProduct = computeDefaultMinWeeklyBrewByProduct(historicalByProduct, BREW_BATCH_SIZE);
       const input = buildBrewPlanningInput({
           forecastCycleId: sessionId || "current",
           generatedAt: new Date().toISOString(),
@@ -942,7 +985,7 @@ export default function Home() {
           manualBrewPlan,
           globalServiceLevel,
           wipByProduct,
-          minWeeklyBrewByProduct,
+          scheduledReceiptsByProduct: wipScheduleByProductWeek,
           planningHorizonWeeks: 8,
           brewLeadTimeWeeks: BREW_LEAD_TIME_WEEKS,
           batchSizeBarrels: BREW_BATCH_SIZE,
@@ -950,7 +993,7 @@ export default function Home() {
           maxCapacityBarrels: MAX_CAPACITY,
       });
       return generateBrewPlan(input);
-  }, [sessionId, weekStartDates, productLevelRows, inventoryDB, historicalRows, manualBrewPlan, globalServiceLevel, packagingInventoryDB]);
+  }, [sessionId, weekStartDates, productLevelRows, inventoryDB, historicalRows, manualBrewPlan, globalServiceLevel, packagingInventoryDB, wipScheduleByProductWeek]);
 
   const masterSchedule = useMemo(() => {
       const weeklyTotals = Array(BREW_DISPLAY_WEEKS).fill(0) as number[];
@@ -1717,7 +1760,7 @@ export default function Home() {
                             {productPlan.scheduledReceipts.map((r, i) => <td key={i} style={{...cellStyle, textAlign: 'center', color: '#0891b2', fontWeight: 'bold'}}>{r > 0 ? formatNumber(r) : '-'}</td>)}
                         </tr>
                         <tr style={{ borderBottom: '1px solid #f1f5f9' }}>
-                            <td style={{...cellStyle, color: '#16a34a', fontWeight: 'bold'}}>➕ Brews Arriving</td>
+                            <td style={{...cellStyle, color: '#16a34a', fontWeight: 'bold'}}>➕ Planned Brews Arriving</td>
                             <td style={cellStyle}>-</td>
                             {productPlan.plannedReceipt.map((r, i) => <td key={i} style={{...cellStyle, textAlign: 'center', color: '#16a34a', fontWeight: 'bold'}}>{r > 0 ? formatNumber(r) : '-'}</td>)}
                         </tr>
@@ -2214,11 +2257,12 @@ export default function Home() {
   function renderSummaryTab() {
     const zRatio = getZRatio(globalServiceLevel);
 
+    const inHorizon = (w: number) => w >= 1 && w <= 8;
     const demandChangesProduct = rows
-      .filter((r) => r.packaging_format === "ALL" && r.effective_value != null && r.effective_value !== r.previous_value)
+      .filter((r) => r.packaging_format === "ALL" && inHorizon(r.week_number) && r.effective_value != null && r.effective_value !== r.previous_value)
       .sort((a, b) => a.brand.localeCompare(b.brand) || a.week_number - b.week_number);
     const demandChangesPackaging = rows
-      .filter((r) => r.packaging_format !== "ALL" && r.effective_value != null && r.effective_value !== r.previous_value)
+      .filter((r) => r.packaging_format !== "ALL" && inHorizon(r.week_number) && r.effective_value != null && r.effective_value !== r.previous_value)
       .sort((a, b) => a.brand.localeCompare(b.brand) || a.packaging_format.localeCompare(b.packaging_format) || a.week_number - b.week_number);
 
     const inventoryChanges = inventoryDB.filter((item) => {
@@ -2240,7 +2284,7 @@ export default function Home() {
     brewingChanges.sort((a, b) => a.brand.localeCompare(b.brand) || a.weekIndex - b.weekIndex);
 
     const totalDemandBbl = rows
-      .filter((r) => r.packaging_format === "ALL")
+      .filter((r) => r.packaging_format === "ALL" && inHorizon(r.week_number))
       .reduce((s, r) => s + getEffectiveOrForecast(r), 0);
     const brandCount = new Set(rows.map((r) => r.brand)).size;
     const totalBrewBbl = brewPlanResult

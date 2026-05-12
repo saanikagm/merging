@@ -149,7 +149,7 @@ export type BuildBrewPlanningInputArgs = {
   globalServiceLevel: ServiceLevel;
   serviceLevelOverridesByProduct?: Record<string, ServiceLevel>;
   wipByProduct?: Record<string, number>;
-  minWeeklyBrewByProduct?: Record<string, number>;
+  scheduledReceiptsByProduct?: Record<string, number[]>;
   planningHorizonWeeks?: number;
   brewLeadTimeWeeks?: number;
   batchSizeBarrels?: number;
@@ -179,9 +179,22 @@ export function buildBrewPlanningInput(args: BuildBrewPlanningInputArgs): BrewPl
   });
 
   const scheduledReceiptsByProduct: Record<string, number[]> = {};
+  // Explicit per-week schedule (e.g., from the Inventory Forecasting Detail Tableau view) wins.
+  if (args.scheduledReceiptsByProduct) {
+    Object.entries(args.scheduledReceiptsByProduct).forEach(([productId, weekly]) => {
+      const hasAny = weekly.some((v) => v > 0);
+      if (!hasAny) return;
+      const padded = weekly.slice(0, horizonWeeks);
+      while (padded.length < horizonWeeks) padded.push(0);
+      scheduledReceiptsByProduct[productId] = padded;
+    });
+  }
+  // Fallback: if no explicit weekly schedule was supplied for a product, spread the
+  // single WIP total evenly across the lead-time window (legacy behavior).
   const wipSpreadWeeks = Math.max(1, args.brewLeadTimeWeeks ?? 2);
   if (args.wipByProduct) {
     Object.entries(args.wipByProduct).forEach(([productId, wipBbl]) => {
+      if (scheduledReceiptsByProduct[productId]) return;
       if (wipBbl > 0) {
         const weekly = Array(horizonWeeks).fill(0) as number[];
         const perWeek = wipBbl / wipSpreadWeeks;
@@ -208,28 +221,8 @@ export function buildBrewPlanningInput(args: BuildBrewPlanningInputArgs): BrewPl
     productForecasts,
     manualReleasesByProduct: args.manualBrewPlan,
     safetyStockOverrideByProduct,
-    minWeeklyBrewByProduct: args.minWeeklyBrewByProduct,
     priorPlanRows: args.priorPlanRows,
   };
-}
-
-export function computeDefaultMinWeeklyBrewByProduct(
-  historicalDemandByProduct: Record<string, number[]>,
-  batchSizeBarrels = 50,
-  recentLookbackWeeks = 4,
-): Record<string, number> {
-  const result: Record<string, number> = {};
-  Object.entries(historicalDemandByProduct).forEach(([productId, weeklyDemand]) => {
-    const recent = weeklyDemand.slice(0, recentLookbackWeeks);
-    const sum = recent.reduce((acc, value) => acc + (Number.isFinite(value) ? value : 0), 0);
-    if (sum <= 0 || recent.length === 0) {
-      result[productId] = 0;
-      return;
-    }
-    const avgWeekly = sum / recent.length;
-    result[productId] = Math.floor(avgWeekly / batchSizeBarrels) * batchSizeBarrels;
-  });
-  return result;
 }
 
 export function computeImpliedWipByProduct(
