@@ -1077,6 +1077,7 @@ export default function Home() {
     });
 
     const reasonText = (reason: string): string => {
+      if (reason === "gap_fill") return "Bring SKU back to target";
       if (reason === "mix_allocation") return "Historical mix split";
       if (reason === "remainder_sweep") return "Surplus to fastest mover";
       if (reason === "no_demand_share") return "No demand history or forecast";

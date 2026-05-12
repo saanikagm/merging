@@ -38,7 +38,12 @@ export type PackagingPlanInput = {
 };
 
 export type SafetyStockMethod = "sigma_z" | "weeks_of_cover_fallback";
-export type AllocationReason = "mix_allocation" | "remainder_sweep" | "no_demand_share" | "no_liquid_ready";
+export type AllocationReason =
+  | "gap_fill"
+  | "mix_allocation"
+  | "remainder_sweep"
+  | "no_demand_share"
+  | "no_liquid_ready";
 
 export type PackagingPlanRow = {
   plan_id: string;
@@ -254,27 +259,63 @@ export function generatePackagingPlan(input: PackagingPlanInput): PackagingPlanR
           allocByFormat[format].reason = "no_liquid_ready";
         });
       } else {
-        const useHistorical = states.some((state) => state.velocity > 0);
-        const weightOf = (state: SkuState): number =>
-          useHistorical ? state.velocity : (totalForecastByFormat[state.format] ?? 0);
-        const totalWeight = states.reduce((sum, state) => sum + weightOf(state), 0);
-
-        if (totalWeight > 0) {
-          states.forEach((state) => {
-            if (state.bblPerUnit <= 0) return;
-            const weight = weightOf(state);
-            if (weight <= 0) return;
-            const share = weight / totalWeight;
-            const targetBbl = readyToPackageBbl * share;
-            const units = Math.floor(targetBbl / state.bblPerUnit);
-            if (units > 0) {
-              const actualBbl = units * state.bblPerUnit;
-              allocByFormat[state.format] = { bbl: actualBbl, reason: "mix_allocation" };
-              remainingReady -= actualBbl;
-            }
-          });
+        // Phase 1 — gap fill, ordered by lowest weeks-of-cover (most likely to stock out first).
+        // SKUs whose projected inventory already covers next-week demand + safety stock have gap = 0
+        // and are skipped here entirely.
+        const weeksOfCover = (state: SkuState): number => {
+          if (state.forecastDemandBbl <= 0) return Number.POSITIVE_INFINITY;
+          return state.projectedBeforePackagingBbl / state.forecastDemandBbl;
+        };
+        const gapFillOrder = states
+          .filter((state) => state.gapBbl > 0 && state.bblPerUnit > 0)
+          .sort((a, b) =>
+            weeksOfCover(a) - weeksOfCover(b) ||
+            b.gapBbl - a.gapBbl ||
+            a.format.localeCompare(b.format),
+          );
+        for (const state of gapFillOrder) {
+          if (remainingReady <= 0) break;
+          const bblToAllocate = Math.min(state.gapBbl, remainingReady);
+          const units = Math.floor(bblToAllocate / state.bblPerUnit);
+          if (units > 0) {
+            const actualBbl = units * state.bblPerUnit;
+            allocByFormat[state.format] = { bbl: actualBbl, reason: "gap_fill" };
+            remainingReady -= actualBbl;
+          }
         }
 
+        // Phase 2 — distribute any beer left over after gaps are filled by historical mix
+        // (or, for products with no history, by forecast demand). Surplus follows where the
+        // brewery normally moves volume.
+        if (remainingReady > 0) {
+          const useHistorical = states.some((state) => state.velocity > 0);
+          const weightOf = (state: SkuState): number =>
+            useHistorical ? state.velocity : (totalForecastByFormat[state.format] ?? 0);
+          const totalWeight = states.reduce((sum, state) => sum + weightOf(state), 0);
+
+          if (totalWeight > 0) {
+            const sweepPool = remainingReady;
+            states.forEach((state) => {
+              if (state.bblPerUnit <= 0) return;
+              const weight = weightOf(state);
+              if (weight <= 0) return;
+              const share = weight / totalWeight;
+              const targetBbl = sweepPool * share;
+              const units = Math.floor(targetBbl / state.bblPerUnit);
+              if (units > 0) {
+                const actualBbl = units * state.bblPerUnit;
+                const prior = allocByFormat[state.format];
+                allocByFormat[state.format] = {
+                  bbl: prior.bbl + actualBbl,
+                  reason: prior.bbl > 0 ? prior.reason : "mix_allocation",
+                };
+                remainingReady -= actualBbl;
+              }
+            });
+          }
+        }
+
+        // Phase 3 — sub-unit slack from floor rounding goes to the fastest mover.
         if (remainingReady > 0) {
           const sweepCandidate = states
             .filter((state) => state.bblPerUnit > 0 && (state.velocity > 0 || (totalForecastByFormat[state.format] ?? 0) > 0))

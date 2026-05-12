@@ -123,7 +123,9 @@ test("single SKU absorbs all ready barrels via mix allocation when it has all th
   assert.equal(week0.allocation_reason, "mix_allocation");
 });
 
-test("allocation follows historical mix when SKUs have history (80/20 split → 80/20 BBL)", () => {
+test("allocation follows historical mix once all gaps are filled (80/20 split → 80/20 BBL)", () => {
+  // Starting inventory is high enough that target − projectedBefore ≤ 0 for both SKUs,
+  // so phase 1 (gap fill) is a no-op and the entire 100 BBL flows through phase 2 by velocity.
   const input: PackagingPlanInput = {
     brewPlan: makeBrewPlanResult([makeBrewRow("p1", WEEKS_4[0], 100)]),
     packagingDemand: [
@@ -135,8 +137,8 @@ test("allocation follows historical mix when SKUs have history (80/20 split → 
       { product_id: "p1", packaging_format: "Case - 24x - 12oz - Can", weeklyDemandBarrels: [20, 20, 20, 20] },
     ],
     packagingInventory: [
-      { product_id: "p1", packaging_format: "Keg - 1/2 bbl", startingInventoryBarrels: 0 },
-      { product_id: "p1", packaging_format: "Case - 24x - 12oz - Can", startingInventoryBarrels: 0 },
+      { product_id: "p1", packaging_format: "Keg - 1/2 bbl", startingInventoryBarrels: 1000 },
+      { product_id: "p1", packaging_format: "Case - 24x - 12oz - Can", startingInventoryBarrels: 1000 },
     ],
     bblPerUnitByFormat: BBL_PER_UNIT_BY_FORMAT,
     serviceLevelByProduct: { p1: 95 },
@@ -151,7 +153,7 @@ test("allocation follows historical mix when SKUs have history (80/20 split → 
   assert.equal(can.allocation_reason, "mix_allocation");
 });
 
-test("falls back to forecast mix when no SKU has historical demand", () => {
+test("falls back to forecast mix when no SKU has historical demand (and gaps are already filled)", () => {
   const input: PackagingPlanInput = {
     brewPlan: makeBrewPlanResult([makeBrewRow("p1", WEEKS_4[0], 100)]),
     packagingDemand: [
@@ -160,8 +162,8 @@ test("falls back to forecast mix when no SKU has historical demand", () => {
     ],
     packagingHistory: [],
     packagingInventory: [
-      { product_id: "p1", packaging_format: "Keg - 1/2 bbl", startingInventoryBarrels: 0 },
-      { product_id: "p1", packaging_format: "Case - 24x - 12oz - Can", startingInventoryBarrels: 0 },
+      { product_id: "p1", packaging_format: "Keg - 1/2 bbl", startingInventoryBarrels: 1000 },
+      { product_id: "p1", packaging_format: "Case - 24x - 12oz - Can", startingInventoryBarrels: 1000 },
     ],
     bblPerUnitByFormat: BBL_PER_UNIT_BY_FORMAT,
     serviceLevelByProduct: { p1: 95 },
@@ -172,6 +174,65 @@ test("falls back to forecast mix when no SKU has historical demand", () => {
   const can = findRow(plan.packagingPlan, "p1", "Case - 24x - 12oz - Can", WEEKS_4[0]);
   assert.ok(keg.allocated_bbl >= 59 && keg.allocated_bbl <= 60, `keg should get ~60 BBL via forecast mix (got ${keg.allocated_bbl})`);
   assert.ok(can.allocated_bbl >= 39 && can.allocated_bbl <= 40, `can should get ~40 BBL via forecast mix (got ${can.allocated_bbl})`);
+});
+
+test("gap-fill phase prioritizes the SKU with the lowest weeks-of-cover", () => {
+  // Both SKUs have equal historical velocity (mix-allocation would split 50/50). But the keg
+  // is already at 3 weeks of cover while the can is at < 1 week. Gap-fill should send the
+  // limited ready beer to the can first, even though historical mix would say otherwise.
+  const input: PackagingPlanInput = {
+    brewPlan: makeBrewPlanResult([makeBrewRow("p1", WEEKS_4[0], 20)]),
+    packagingDemand: [
+      { product_id: "p1", packaging_format: "Keg - 1/2 bbl", weeklyDemandBarrels: [10, 10, 10, 10], weekStartDates: WEEKS_4 },
+      { product_id: "p1", packaging_format: "Case - 24x - 12oz - Can", weeklyDemandBarrels: [10, 10, 10, 10], weekStartDates: WEEKS_4 },
+    ],
+    packagingHistory: [
+      { product_id: "p1", packaging_format: "Keg - 1/2 bbl", weeklyDemandBarrels: [10, 10, 10, 10] },
+      { product_id: "p1", packaging_format: "Case - 24x - 12oz - Can", weeklyDemandBarrels: [10, 10, 10, 10] },
+    ],
+    packagingInventory: [
+      { product_id: "p1", packaging_format: "Keg - 1/2 bbl", startingInventoryBarrels: 30 },
+      { product_id: "p1", packaging_format: "Case - 24x - 12oz - Can", startingInventoryBarrels: 5 },
+    ],
+    bblPerUnitByFormat: BBL_PER_UNIT_BY_FORMAT,
+    serviceLevelByProduct: { p1: 95 },
+    generatedAt: "2026-05-04T12:00:00.000Z",
+  };
+  const plan = generatePackagingPlan(input);
+  const keg = findRow(plan.packagingPlan, "p1", "Keg - 1/2 bbl", WEEKS_4[0]);
+  const can = findRow(plan.packagingPlan, "p1", "Case - 24x - 12oz - Can", WEEKS_4[0]);
+  assert.ok(can.allocated_bbl > keg.allocated_bbl, `can should beat keg on allocation (keg ${keg.allocated_bbl}, can ${can.allocated_bbl})`);
+  assert.equal(can.allocation_reason, "gap_fill");
+});
+
+test("gap-fill caps each SKU at its own gap; surplus spills to historical mix", () => {
+  // Can has a tiny gap (~15 BBL) and keg has none. Plenty of beer (200 BBL ready). Phase 1
+  // closes can's gap, phase 2 distributes the rest by historical velocity (keg = 90% history).
+  const input: PackagingPlanInput = {
+    brewPlan: makeBrewPlanResult([makeBrewRow("p1", WEEKS_4[0], 200)]),
+    packagingDemand: [
+      { product_id: "p1", packaging_format: "Keg - 1/2 bbl", weeklyDemandBarrels: [10, 10, 10, 10], weekStartDates: WEEKS_4 },
+      { product_id: "p1", packaging_format: "Case - 24x - 12oz - Can", weeklyDemandBarrels: [10, 10, 10, 10], weekStartDates: WEEKS_4 },
+    ],
+    packagingHistory: [
+      { product_id: "p1", packaging_format: "Keg - 1/2 bbl", weeklyDemandBarrels: [90, 90, 90, 90] },
+      { product_id: "p1", packaging_format: "Case - 24x - 12oz - Can", weeklyDemandBarrels: [10, 10, 10, 10] },
+    ],
+    packagingInventory: [
+      { product_id: "p1", packaging_format: "Keg - 1/2 bbl", startingInventoryBarrels: 1000 },
+      { product_id: "p1", packaging_format: "Case - 24x - 12oz - Can", startingInventoryBarrels: 0 },
+    ],
+    bblPerUnitByFormat: BBL_PER_UNIT_BY_FORMAT,
+    serviceLevelByProduct: { p1: 95 },
+    generatedAt: "2026-05-04T12:00:00.000Z",
+  };
+  const plan = generatePackagingPlan(input);
+  const keg = findRow(plan.packagingPlan, "p1", "Keg - 1/2 bbl", WEEKS_4[0]);
+  const can = findRow(plan.packagingPlan, "p1", "Case - 24x - 12oz - Can", WEEKS_4[0]);
+  // Keg got mix-allocation surplus; can got its small gap fill.
+  assert.equal(keg.allocation_reason, "mix_allocation");
+  assert.equal(can.allocation_reason, "gap_fill");
+  assert.ok(keg.allocated_bbl > can.allocated_bbl, `keg surplus should dominate (keg ${keg.allocated_bbl}, can ${can.allocated_bbl})`);
 });
 
 test("legacy: ties on gap are broken by velocity (faster mover wins)", { skip: true }, () => {
