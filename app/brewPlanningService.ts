@@ -13,6 +13,7 @@ export type BrewPlanningInput = {
   forecastCycleId: string;
   generatedAt?: string;
   planningHorizonWeeks?: number;
+  displayHorizonWeeks?: number;
   serviceLevelByProduct?: Record<string, ServiceLevel>;
   currentInventoryByProduct: Record<string, number>;
   historicalDemandByProduct: Record<string, number[]>;
@@ -51,7 +52,10 @@ export type ProductLevelBrewPlanRow = {
   actual_brew_barrels: number;
   capacity_status: CapacityStatus;
   notes: string;
+  below_min_demand: boolean;
 };
+
+export const MIN_PERIOD_DEMAND_BBL = 12;
 
 export type WeeklyCapacitySummaryRow = {
   plan_id: string;
@@ -133,6 +137,7 @@ function valueAt(values: number[] | undefined, index: number): number {
 
 export function generateBrewPlan(input: BrewPlanningInput): BrewPlanningResult {
   const planningHorizonWeeks = input.planningHorizonWeeks ?? 8;
+  const displayHorizonWeeks = input.displayHorizonWeeks ?? 6;
   const brewLeadTimeWeeks = input.brewLeadTimeWeeks ?? 2;
   const batchSizeBarrels = input.batchSizeBarrels ?? 50;
   const targetCapacityBarrels = input.targetCapacityBarrels ?? 400;
@@ -152,6 +157,10 @@ export function generateBrewPlan(input: BrewPlanningInput): BrewPlanningResult {
     const scheduledReceipts = input.scheduledReceiptsByProduct?.[forecast.product_id] ?? [];
     const horizonForecast = forecast.weeklyForecastBarrels.slice(0, planningHorizonWeeks);
     const totalForecast = horizonForecast.reduce((sum, value) => sum + value, 0);
+    // Suppress auto-brew recommendations when 6-week (display window) demand is below the threshold.
+    // Why: seasonals (e.g. Oktoberfest in spring) and noise-only forecasts shouldn't trigger 50-bbl batches.
+    const displayForecastTotal = horizonForecast.slice(0, displayHorizonWeeks).reduce((sum, value) => sum + value, 0);
+    const belowMinDemand = displayForecastTotal < MIN_PERIOD_DEMAND_BBL;
     const levelProduction = (totalForecast + safetyStock - currentInventory) / planningHorizonWeeks;
 
     const levelProjectedInventory: number[] = [];
@@ -177,6 +186,9 @@ export function generateBrewPlan(input: BrewPlanningInput): BrewPlanningResult {
       if (manualReceiptValue !== undefined) {
         netRequirement = 0;
         plannedReceipt = manualReceiptValue;
+      } else if (belowMinDemand) {
+        netRequirement = 0;
+        plannedReceipt = 0;
       } else {
         netRequirement = Math.max(0, grossRequirements + safetyStock - priorProjectedAvailable - scheduledReceipt);
         plannedReceipt = roundUpToBatch(netRequirement, batchSizeBarrels);
@@ -230,6 +242,7 @@ export function generateBrewPlan(input: BrewPlanningInput): BrewPlanningResult {
         notes: immediatePastDueRelease
           ? `Immediate release includes ${pastDueReceipts} BBL of receipts needed inside the first ${brewLeadTimeWeeks} weeks.`
           : receiptReleaseBeforeHorizon ? `Receipt requires release before visible horizon due to ${brewLeadTimeWeeks}-week lead time.` : "",
+        below_min_demand: belowMinDemand,
       });
     }
   });

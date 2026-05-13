@@ -151,6 +151,7 @@ export type BuildBrewPlanningInputArgs = {
   wipByProduct?: Record<string, number>;
   scheduledReceiptsByProduct?: Record<string, number[]>;
   planningHorizonWeeks?: number;
+  displayHorizonWeeks?: number;
   brewLeadTimeWeeks?: number;
   batchSizeBarrels?: number;
   targetCapacityBarrels?: number;
@@ -210,6 +211,7 @@ export function buildBrewPlanningInput(args: BuildBrewPlanningInputArgs): BrewPl
     forecastCycleId: args.forecastCycleId,
     generatedAt: args.generatedAt,
     planningHorizonWeeks: horizonWeeks,
+    displayHorizonWeeks: args.displayHorizonWeeks,
     brewLeadTimeWeeks: args.brewLeadTimeWeeks,
     batchSizeBarrels: args.batchSizeBarrels,
     targetCapacityBarrels: args.targetCapacityBarrels,

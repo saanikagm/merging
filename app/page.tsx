@@ -987,6 +987,7 @@ export default function Home() {
           wipByProduct,
           scheduledReceiptsByProduct: wipScheduleByProductWeek,
           planningHorizonWeeks: 8,
+          displayHorizonWeeks: BREW_DISPLAY_WEEKS,
           brewLeadTimeWeeks: BREW_LEAD_TIME_WEEKS,
           batchSizeBarrels: BREW_BATCH_SIZE,
           targetCapacityBarrels: WARNING_THRESHOLD,
@@ -1579,6 +1580,7 @@ export default function Home() {
       leadTimeWeeks,
       pastDueReceipts: rows.slice(0, leadTimeWeeks).reduce((sum, row) => sum + row.planned_order_receipt, 0),
       displayWeeks,
+      belowMinDemand: rows[0]?.below_min_demand ?? false,
     };
   }
 
@@ -1730,9 +1732,17 @@ export default function Home() {
             </div>
 
             {(() => {
+              const noticeStyle = { margin: "0 24px 16px 24px", padding: "12px 16px", background: "#fef3c7", border: "1px solid #f59e0b", borderRadius: "12px", color: "#92400e", fontSize: "13px", fontWeight: 600 } as const;
+              if (productPlan.belowMinDemand) {
+                return (
+                  <div style={noticeStyle}>
+                    Notice: Forecasted demand is below 12 BBL over the next 6 weeks. No brews recommended even if inventory is below safety stock.
+                  </div>
+                );
+              }
               if (opsProductData.startInv < opsProductData.finalSS) {
                 return (
-                  <div style={{ margin: "0 24px 16px 24px", padding: "12px 16px", background: "#fef3c7", border: "1px solid #f59e0b", borderRadius: "12px", color: "#92400e", fontSize: "13px", fontWeight: 600 }}>
+                  <div style={noticeStyle}>
                     Notice: Current inventory is below the desired safety stock. Expedited brews have been automatically scheduled for immediate release (Wk 0).
                   </div>
                 );

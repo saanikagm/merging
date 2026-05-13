@@ -59,6 +59,7 @@ function makeBrewRow(
     actual_brew_barrels: 0,
     capacity_status: "OK",
     notes: "",
+    below_min_demand: false,
   };
 }
 
