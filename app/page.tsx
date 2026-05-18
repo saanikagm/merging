@@ -1588,6 +1588,9 @@ export default function Home() {
     if (!masterSchedule || !opsProductData || !brewPlanResult) return null;
     const productRows = brewPlanResult.productLevelBrewPlan.filter((row) => row.product_id === opsProductData.name);
     const productPlan = adaptBrewRowsToLegacyShape(productRows, BREW_DISPLAY_WEEKS, BREW_LEAD_TIME_WEEKS);
+    const excludedProducts = Array.from(
+      new Set(brewPlanResult.productLevelBrewPlan.filter((row) => row.below_min_demand).map((row) => row.product_id)),
+    ).sort();
     const brewingLocked = !!planWorkflow.brewingLockedAt;
     return (
       <div style={{ display: "flex", flexDirection: "column", gap: "20px" }}>
@@ -1723,6 +1726,36 @@ export default function Home() {
             <select value={selectedOpsProduct} onChange={(e) => setSelectedOpsProduct(e.target.value)} style={selectStyle}>
                 {products.map(p => <option key={p} value={p}>{p}</option>)}
             </select>
+            {excludedProducts.length > 0 && (
+                <div style={{ marginTop: '14px', padding: '12px 14px', background: '#fffbeb', border: '1px solid #fcd34d', borderRadius: '10px' }}>
+                    <div style={{ fontSize: '12px', fontWeight: 700, color: '#92400e', marginBottom: '8px', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+                        Excluded from brewing recommendations · 6-week demand below 12 BBL ({excludedProducts.length})
+                    </div>
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
+                        {excludedProducts.map(p => {
+                            const isActive = selectedOpsProduct === p;
+                            return (
+                                <button
+                                    key={p}
+                                    onClick={() => setSelectedOpsProduct(p)}
+                                    style={{
+                                        padding: '4px 12px',
+                                        background: isActive ? '#fde68a' : 'white',
+                                        border: '1px solid #f59e0b',
+                                        borderRadius: '999px',
+                                        color: '#92400e',
+                                        fontSize: '12px',
+                                        fontWeight: 600,
+                                        cursor: 'pointer',
+                                    }}
+                                >
+                                    {p}
+                                </button>
+                            );
+                        })}
+                    </div>
+                </div>
+            )}
         </div>
 
         <div style={tableCardStyle}>
