@@ -208,6 +208,25 @@ function downloadCsvFile(filename: string, lines: string[]) {
   URL.revokeObjectURL(url);
 }
 
+async function extractApiError(res: Response): Promise<string> {
+  try {
+    const text = await res.text();
+    if (!text) return `HTTP ${res.status}`;
+    try {
+      const json = JSON.parse(text);
+      const detail = json?.detail ?? json?.error ?? json?.message;
+      if (typeof detail === "string" && detail.trim()) {
+        return `HTTP ${res.status}: ${detail.trim().slice(0, 400)}`;
+      }
+    } catch {
+      // not JSON; fall through to raw text
+    }
+    return `HTTP ${res.status}: ${text.trim().slice(0, 400)}`;
+  } catch {
+    return `HTTP ${res.status}`;
+  }
+}
+
 async function fetchWipScheduleAligned(
   apiUrl: string,
   apiKey: string,
@@ -357,7 +376,7 @@ export default function Home() {
       const apiUrl = process.env.NEXT_PUBLIC_FORECAST_API_URL || "http://localhost:8000";
       const apiKey = process.env.NEXT_PUBLIC_FORECAST_API_KEY || "";
       const invRes = await fetch(`${apiUrl}/inventory`, { headers: { "X-API-Key": apiKey } });
-      if (!invRes.ok) throw new Error(`Inventory fetch failed: ${invRes.status}`);
+      if (!invRes.ok) throw new Error(await extractApiError(invRes));
       const invJson = await invRes.json();
       const tableauRows: Array<Record<string, string>> = invJson.rows || [];
       const totalsByProduct: Record<string, number> = {};
